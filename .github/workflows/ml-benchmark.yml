@@ -1,15 +1,13 @@
 name: ML and LLM Gateway Benchmark
 
 on:
-  schedule:
-    - cron: '30 5 * * 1'
   workflow_dispatch:
     inputs:
       provider:
         description: 'Cloud LLM provider route (litellm, openai, or gemini)'
         required: false
         type: string
-        default: 'openai'
+        default: 'litellm'
       dataset:
         description: 'Benchmark dataset (textoir_banking77, textoir_clinc_oos, airweave_incidents, cfpb_claims)'
         required: false
@@ -28,10 +26,10 @@ jobs:
       project-dir: .
       target: ci-benchmark
       python-version: '3.11'
-      provider: ${{ inputs.provider || 'openai' }}
+      provider: ${{ inputs.provider || 'litellm' }}
       dataset: ${{ inputs.dataset || 'textoir_banking77' }}
-      report-file: BENCHMARK_REPORT.md
+      report-file: data/reports/benchmark.md
       artifacts-dir: data/artifacts
-      gateway-base-url: ${{ vars.LLM_GATEWAY_BASE_URL || 'https://82.70.210.36.sslip.io/v1' }}
+      gateway-base-url: ${{ vars.LLM_GATEWAY_BASE_URL }}
     secrets:
       llm-gateway-api-key: ${{ secrets.LLM_GATEWAY_API_KEY }}

@@ -1,0 +1,48 @@
+name: Container
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '43 4 * * 1'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - run: docker build --pull --tag ticket-classification:ci .
+      - name: Verify runtime isolation and startup validation
+        run: |
+          docker run --rm --read-only --tmpfs /tmp -i ticket-classification:ci python - <<'PY'
+          import os
+          from pydantic import ValidationError
+          from ticket_classification.config.settings import AppSettings
+          from ticket_classification.controllers.server import main
+          from ticket_classification.controllers.worker import main as worker
+          assert os.getuid() == 10001
+          try:
+              AppSettings()
+          except ValidationError:
+              pass
+          else:
+              raise AssertionError("Production must reject missing credentials")
+          print("Runtime imports, non-root execution and startup validation passed.")
+          PY
+      - name: Audit installed runtime dependencies
+        run: |
+          docker run --rm -i ticket-classification:ci python - <<'PYCODE' > runtime-requirements.txt
+          import importlib.metadata
+          for package in sorted(importlib.metadata.distributions(), key=lambda p: p.metadata["Name"]):
+              name = package.metadata["Name"]
+              if name.lower() not in {"ticket-classification", "llm-gateway-sdk"}:
+                  print(f"{name}=={package.version}")
+          PYCODE
+          python -m venv /tmp/ticket-audit
+          /tmp/ticket-audit/bin/python -m pip install --quiet pip-audit==2.9.0
+          /tmp/ticket-audit/bin/pip-audit -r runtime-requirements.txt --no-deps --disable-pip

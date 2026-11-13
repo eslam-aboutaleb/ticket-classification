@@ -18,17 +18,10 @@ dist/
 build/
 *.egg-info/
 
-# Data & Model Artifacts
-data/raw/*
-!data/raw/.gitkeep
-data/interim/*
-!data/interim/.gitkeep
-data/cache/*
-!data/cache/.gitkeep
-data/artifacts/*
-!data/artifacts/.gitkeep
-data/live_smoke/
-data/review_queue.sqlite*
+# Runtime files
+data/
+secrets/
+.playwright-mcp/
 
 # OS & IDE
 .DS_Store

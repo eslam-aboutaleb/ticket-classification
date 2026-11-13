@@ -8,8 +8,8 @@
         "3.12"
       ],
       "coverage-source": "src/ticket_classification",
-      "coverage-min": 85,
-      "build-distribution": false
+      "coverage-min": 90,
+      "build-distribution": true
     }
   }
 }

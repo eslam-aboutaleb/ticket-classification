@@ -1,0 +1,74 @@
+x-runtime: &runtime
+  image: ticket-classification:${IMAGE_TAG:-local}
+  build: .
+  env_file:
+    - path: ${RUNTIME_ENV_FILE:-.env}
+      required: false
+  environment:
+    APP_ENV: production
+    AUTH_ENABLED: "true"
+    CONFIG_PATH: /app/configs/pipeline_config.yaml
+    DATA_DIR: /data
+    AUTH_TOKENS_FILE: /run/secrets/auth_tokens
+    ARTIFACT_HMAC_SECRET_FILE: /run/secrets/artifact_hmac
+    GATEWAY_KEY_FILE: /run/secrets/gateway_key
+  secrets:
+    - auth_tokens
+    - artifact_hmac
+    - gateway_key
+  volumes:
+    - ticket-data:/data
+  read_only: true
+  tmpfs:
+    - /tmp:size=128m,mode=1777
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  init: true
+  restart: unless-stopped
+  pids_limit: 128
+  stop_grace_period: 45s
+
+services:
+  api:
+    <<: *runtime
+    command: [ticket-api, --workers, "1", --limit-concurrency, "64"]
+    ports: ["127.0.0.1:8000:8000"]
+    mem_limit: 1g
+    cpus: 1
+    healthcheck:
+      test: [CMD, python, -m, ticket_classification.controllers.healthcheck, api]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+  worker:
+    <<: *runtime
+    command: [ticket-worker]
+    environment:
+      APP_ENV: production
+      AUTH_ENABLED: "true"
+      CONFIG_PATH: /app/configs/pipeline_config.yaml
+      DATA_DIR: /data
+      AUTH_TOKENS_FILE: /run/secrets/auth_tokens
+      ARTIFACT_HMAC_SECRET_FILE: /run/secrets/artifact_hmac
+      GATEWAY_KEY_FILE: /run/secrets/gateway_key
+      WORKER_HEALTH_FILE: /tmp/worker-heartbeat
+    mem_limit: 4g
+    cpus: 2
+    healthcheck:
+      test: [CMD, python, -m, ticket_classification.controllers.healthcheck, worker]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  ticket-data:
+
+secrets:
+  auth_tokens:
+    file: ./secrets/auth_tokens.json
+  artifact_hmac:
+    file: ./secrets/artifact_hmac
+  gateway_key:
+    file: ./secrets/gateway_key
