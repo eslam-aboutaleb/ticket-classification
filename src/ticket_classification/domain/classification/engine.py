@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy import sparse
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import GradientBoostingClassifier
@@ -20,25 +21,36 @@ class ClassifierSuite:
         confidence_quantile_cutoff: float = 0.10,
         open_set_distance_quantile: float = 0.96,
         random_state: int = 42,
+        candidate_models: list[str] | None = None,
     ) -> None:
         self.min_data_per_class = min_data_per_class
         self.confidence_quantile_cutoff = confidence_quantile_cutoff
         self.open_set_distance_quantile = open_set_distance_quantile
         self.random_state = random_state
+        self.candidate_models = candidate_models or [
+            "naive_majority",
+            "logistic_regression",
+            "calibrated_linear_svc",
+            "gradient_boosting",
+            "frozen_prototype",
+        ]
 
         self.models_: dict[str, object] = {}
         self.best_model_name_: str = "logistic_regression"
         self.centroids_: np.ndarray | None = None
         self.distance_threshold_: float = 0.65
         self.valid_classes_: set[int] = set()
+        self.calibration_status_: str = "training_fallback"
+        self.calibration_sample_count_: int = 0
+        self.calibration_distances_ = np.empty(0)
 
     def filter_pseudo_labels(
         self,
-        X: np.ndarray,
+        X: np.ndarray | sparse.spmatrix,
         cluster_ids: np.ndarray,
         confidences: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Filter low-confidence boundary points and gate rare classes (karolzak + DeepAligned pattern)."""
+    ) -> tuple[np.ndarray | sparse.spmatrix, np.ndarray]:
+        """Filter low-confidence points and classes with insufficient support."""
         if not len(confidences):
             self.valid_classes_ = set()
             return X[:0], cluster_ids[:0]
@@ -53,7 +65,6 @@ class ClassifierSuite:
         )
         mask = confidences >= conf_floor
 
-        # Enforce min_data_per_class support gating
         unique, counts = np.unique(cluster_ids[mask], return_counts=True)
         valid_classes = {
             int(c)
@@ -68,13 +79,14 @@ class ClassifierSuite:
 
     def fit_all(
         self,
-        X_train: np.ndarray,
+        X_train: np.ndarray | sparse.spmatrix,
         embeddings_train: np.ndarray,
         cluster_ids_train: np.ndarray,
         confidences_train: np.ndarray,
     ) -> dict[str, object]:
-        """Fit baseline, linear, SVM, and gradient boosted classifiers on filtered pseudo-labels."""
+        """Fit configured classifiers on filtered pseudo-labels."""
         self.best_model_name_ = "logistic_regression"
+        self.calibration_distances_ = np.empty(0)
         X_clean, y_clean = self.filter_pseudo_labels(
             X_train, cluster_ids_train, confidences_train
         )
@@ -84,7 +96,6 @@ class ClassifierSuite:
             self.best_model_name_ = "unassigned"
             return self.models_
 
-        # Compute cluster centroids in normalized embedding space for Open-Set distance gate
         norm_emb = normalize(embeddings_train, norm="l2")
         unique_classes = sorted(self.valid_classes_)
         centroids = []
@@ -96,14 +107,14 @@ class ClassifierSuite:
         self.centroids_ = np.vstack(centroids)
         self.class_index_to_id_ = {idx: c for idx, c in enumerate(unique_classes)}
 
-        # Calibrate Open-Set cosine distance threshold (1 - max_cosine_similarity) on training data
         cos_sims = norm_emb @ self.centroids_.T
         min_dists = 1.0 - np.max(cos_sims, axis=1)
         self.distance_threshold_ = float(
             np.quantile(min_dists, self.open_set_distance_quantile)
         )
+        self.calibration_status_ = "training_fallback"
+        self.calibration_sample_count_ = len(min_dists)
 
-        # Majority class baseline
         dummy = DummyClassifier(strategy="most_frequent")
         dummy.fit(X_clean, y_clean)
         if len(unique_classes) == 1:
@@ -111,54 +122,77 @@ class ClassifierSuite:
             self.best_model_name_ = "single_cluster"
             return self.models_
 
-        # Multinomial logistic regression with balanced class weights
-        logreg = LogisticRegression(
-            C=2.0,
-            max_iter=1000,
-            class_weight="balanced",
-            random_state=self.random_state,
-        )
-        logreg.fit(X_clean, y_clean)
+        enabled = set(self.candidate_models)
+        models: dict[str, object] = {}
 
-        # Calibrated linear support vector classifier
-        min_class_count = int(np.min(np.unique(y_clean, return_counts=True)[1]))
-        cv_folds = max(2, min(3, min_class_count))
-        base_svc = LinearSVC(
-            C=1.0, class_weight="balanced", random_state=self.random_state
-        )
-        if min_class_count >= 2:
-            svc = CalibratedClassifierCV(base_svc, cv=cv_folds)
-            svc.fit(X_clean, y_clean)
-        else:
-            svc = logreg
+        if "naive_majority" in enabled:
+            models["naive_majority"] = dummy
 
-        # Gradient boosted tree ensemble
-        gbdt = GradientBoostingClassifier(
-            n_estimators=60,
-            max_depth=3,
-            learning_rate=0.1,
-            random_state=self.random_state,
-        )
-        gbdt.fit(X_clean, y_clean)
+        logreg = None
+        if "logistic_regression" in enabled or not enabled:
+            logreg = LogisticRegression(
+                C=2.0,
+                max_iter=1000,
+                class_weight="balanced",
+                random_state=self.random_state,
+            )
+            logreg.fit(X_clean, y_clean)
+            models["logistic_regression"] = logreg
 
-        self.models_ = {
-            "naive_majority": dummy,
-            "logistic_regression": logreg,
-            "calibrated_linear_svc": svc,
-            "gradient_boosting": gbdt,
-            "frozen_prototype": None,
-        }
+        if "calibrated_linear_svc" in enabled:
+            min_class_count = int(np.min(np.unique(y_clean, return_counts=True)[1]))
+            cv_folds = max(2, min(3, min_class_count))
+            base_svc = LinearSVC(
+                C=1.0, class_weight="balanced", random_state=self.random_state
+            )
+            if min_class_count >= 2:
+                svc = CalibratedClassifierCV(base_svc, cv=cv_folds)
+                svc.fit(X_clean, y_clean)
+            else:
+                if logreg is None:
+                    logreg = LogisticRegression(
+                        C=2.0,
+                        max_iter=1000,
+                        class_weight="balanced",
+                        random_state=self.random_state,
+                    ).fit(X_clean, y_clean)
+                svc = logreg
+            models["calibrated_linear_svc"] = svc
+
+        if "gradient_boosting" in enabled:
+            gbdt = GradientBoostingClassifier(
+                n_estimators=60,
+                max_depth=3,
+                learning_rate=0.1,
+                random_state=self.random_state,
+            )
+            X_gbdt = X_clean.toarray() if sparse.issparse(X_clean) else X_clean
+            gbdt.fit(X_gbdt, y_clean)
+            models["gradient_boosting"] = gbdt
+
+        if "frozen_prototype" in enabled:
+            models["frozen_prototype"] = None
+
+        self.models_ = models
+        non_baseline = [
+            m for m in models if m not in {"naive_majority", "frozen_prototype"}
+        ]
+        if non_baseline and self.best_model_name_ not in models:
+            self.best_model_name_ = non_baseline[0]
+        elif not non_baseline and models:
+            self.best_model_name_ = next(iter(models))
         return self.models_
 
     def predict_with_open_set(
         self,
-        X: np.ndarray,
+        X: np.ndarray | sparse.spmatrix,
         embeddings: np.ndarray,
         model_name: str | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Return (pred_cluster_ids, confidences, margins, is_open_set_novel, centroid_distances)."""
         target_name = model_name or self.best_model_name_
-        if not len(X):
+        n_rows = X.shape[0]
+        if not n_rows:
             return (
                 np.empty(0, dtype=int),
                 np.empty(0),
@@ -167,14 +201,15 @@ class ClassifierSuite:
                 np.empty(0),
             )
         if not self.models_:
-            n = len(X)
             return (
-                np.full(n, -1),
-                np.zeros(n),
-                np.zeros(n),
-                np.ones(n, dtype=bool),
-                np.ones(n),
+                np.full(n_rows, -1),
+                np.zeros(n_rows),
+                np.zeros(n_rows),
+                np.ones(n_rows, dtype=bool),
+                np.ones(n_rows),
             )
+        if target_name not in self.models_:
+            target_name = self.best_model_name_
         if target_name == "frozen_prototype":
             similarities = normalize(embeddings) @ self.centroids_.T
             weights = np.exp(
@@ -186,7 +221,12 @@ class ClassifierSuite:
             )
         else:
             clf = self.models_[target_name]
-            probs = clf.predict_proba(X)
+            X_infer = (
+                X.toarray()
+                if sparse.issparse(X) and isinstance(clf, GradientBoostingClassifier)
+                else X
+            )
+            probs = clf.predict_proba(X_infer)
             classes = clf.classes_
         sorted_probs = np.sort(probs, axis=1)
         top_idx = np.argmax(probs, axis=1)
@@ -212,10 +252,47 @@ class ClassifierSuite:
         distances = 1.0 - np.max(normalize(embeddings) @ self.centroids_.T, axis=1)
         return distances, distances > self.distance_threshold_
 
-    def calibrate_novelty(self, embeddings: np.ndarray) -> None:
+    def calibrate_novelty(self, embeddings: np.ndarray, min_samples: int = 1) -> str:
         """Fit the serving gate on held-out known examples in original embedding space."""
-        if self.centroids_ is not None and len(self.centroids_) and len(embeddings):
-            distances = 1.0 - np.max(normalize(embeddings) @ self.centroids_.T, axis=1)
-            self.distance_threshold_ = float(
-                np.quantile(distances, self.open_set_distance_quantile)
-            )
+        if self.centroids_ is None or not len(self.centroids_) or not len(embeddings):
+            self.calibration_status_ = "training_fallback"
+            self.calibration_sample_count_ = 0
+            self.calibration_distances_ = np.empty(0)
+            return self.calibration_status_
+        distances = 1.0 - np.max(normalize(embeddings) @ self.centroids_.T, axis=1)
+        self.distance_threshold_ = float(
+            np.quantile(distances, self.open_set_distance_quantile)
+        )
+        self.calibration_distances_ = distances.copy()
+        self.calibration_sample_count_ = len(embeddings)
+        self.calibration_status_ = (
+            "held_out_known"
+            if len(embeddings) >= min_samples
+            else "low_evidence_held_out"
+        )
+        return self.calibration_status_
+
+    def compact_for_serving(self) -> ClassifierSuite:
+        """Return a compact inference copy retaining only the selected serving classifier and centroids."""
+        clone = ClassifierSuite(
+            min_data_per_class=self.min_data_per_class,
+            confidence_quantile_cutoff=self.confidence_quantile_cutoff,
+            open_set_distance_quantile=self.open_set_distance_quantile,
+            random_state=self.random_state,
+            candidate_models=[self.best_model_name_],
+        )
+        clone.best_model_name_ = self.best_model_name_
+        clone.models_ = (
+            {self.best_model_name_: self.models_[self.best_model_name_]}
+            if self.best_model_name_ in self.models_
+            else {}
+        )
+        clone.centroids_ = (
+            self.centroids_.astype(np.float32) if self.centroids_ is not None else None
+        )
+        clone.class_index_to_id_ = dict(getattr(self, "class_index_to_id_", {}))
+        clone.distance_threshold_ = self.distance_threshold_
+        clone.valid_classes_ = set(self.valid_classes_)
+        clone.calibration_status_ = self.calibration_status_
+        clone.calibration_sample_count_ = self.calibration_sample_count_
+        return clone

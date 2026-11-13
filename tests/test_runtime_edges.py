@@ -135,7 +135,20 @@ def test_cli_custom_file_and_benchmark_have_no_fixed_k_defaults(
     container = SimpleNamespace(
         pipeline_service=service, report_view=ReportAndPlotView(tmp_path)
     )
-    monkeypatch.setattr(cli, "AppSettings", lambda **kwargs: SimpleNamespace(**kwargs))
+    original_settings = cli.AppSettings
+    settings_seen = []
+    config_path = tmp_path / "pipeline.yaml"
+    config_path.write_text("{}\n")
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("DOMAIN_ID", "customer_claim")
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+
+    def settings_factory(**kwargs):
+        settings = original_settings(_env_file=None, **kwargs)
+        settings_seen.append(settings)
+        return settings
+
+    monkeypatch.setattr(cli, "AppSettings", settings_factory)
     monkeypatch.setattr(cli, "ServiceContainer", lambda **kwargs: container)
     path = tmp_path / "claims.jsonl"
     path.write_text('{"raw_text":"مشكلة في الدفع"}\n', encoding="utf-8")
@@ -150,6 +163,8 @@ def test_cli_custom_file_and_benchmark_have_no_fixed_k_defaults(
         service.fit_dataframe.call_args.args[0].iloc[0]["raw_text"] == "مشكلة في الدفع"
     )
     assert report.exists()
+    assert settings_seen[0].domain_id == "customer_claim"
+    assert settings_seen[0].config_path == str(config_path)
     assert json.loads(capsys.readouterr().out)["evaluated"] is False
     assert (
         cli.main(["--dataset", "textoir_banking77", "--report-path", str(report)]) == 0

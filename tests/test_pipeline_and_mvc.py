@@ -1,4 +1,4 @@
-"""Unit and Integration Tests for Cloud-Native Ticket & Claim Clustering and Classification."""
+"""Ticket pipeline and HTTP API behavior."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from typing import TypeVar
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
+from conftest import SYNTHETIC_RELEASE_POLICY
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
@@ -62,7 +64,7 @@ class DeterministicMockGateway(BaseCloudGateway):
                 hits = sum(1 for kw in kw_group if kw in low)
                 if hits > 0:
                     base[idx * 6 : (idx + 1) * 6] += hits * 3.0
-            # Add deterministic tiny jitter from text hash
+
             digest = hashlib.sha256(low.encode("utf-8")).digest()
             noise = np.frombuffer(digest[:32], dtype=np.uint8).astype(float) / 2550.0
             vec = base + noise
@@ -98,7 +100,7 @@ class DeterministicMockGateway(BaseCloudGateway):
 def test_provider_switching_between_litellm_openai_and_gemini() -> None:
     """Verify that switching between litellm, openai, and gemini resolves distinct models and fingerprints."""
     settings = AppSettings(
-        gateway_base="https://82.70.210.36.sslip.io/v1",
+        gateway_base="https://gateway.example/v1",
         gateway_key="sk-test-virtual-key-123456",
         llm_provider=LLMProvider.LITELLM,
     )
@@ -107,14 +109,12 @@ def test_provider_switching_between_litellm_openai_and_gemini() -> None:
     assert settings.resolve_model(ModelTier.EMBEDDING) == "rag-embedding"
     id_litellm = settings.embedding_identity()
 
-    # Switch to OpenAI
     settings.llm_provider = LLMProvider.OPENAI
     assert settings.resolve_model(ModelTier.CHEAP) == "gpt-4o-mini"
     assert settings.resolve_model(ModelTier.STRONG) == "gpt-4o"
     assert settings.resolve_model(ModelTier.EMBEDDING) == "text-embedding-3-small"
     id_openai = settings.embedding_identity()
 
-    # Switch to Gemini
     settings.llm_provider = LLMProvider.GEMINI
     assert settings.resolve_model(ModelTier.CHEAP) == "gemini-3.8-flash"
     assert settings.resolve_model(ModelTier.STRONG) == "gemini-4-argon"
@@ -181,7 +181,6 @@ def test_hungarian_alignment_and_outlier_recovery() -> None:
     assert len(clusters) == 45
     assert engine.optimal_k_ in (3, 4)
 
-    # Test outlier recovery directly
     proj = engine._project_embeddings(X[:5], is_fit=False)
     noisy_labels = np.array([-1, 0, -1, 1, 2])
     assert engine.centroids_ is not None
@@ -194,17 +193,21 @@ def test_hungarian_alignment_and_outlier_recovery() -> None:
 
 def test_end_to_end_service_and_fastapi_mvc_controllers(tmp_path: Path) -> None:
     """Verify full benchmark pipeline and FastAPI MVC controllers with provider switching."""
+    config_path = tmp_path / "pipeline.yaml"
+    config = AppSettings(_env_file=None).load_pipeline_yaml()
+    config["release"] = SYNTHETIC_RELEASE_POLICY
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
     settings = AppSettings(
-        gateway_base="https://82.70.210.36.sslip.io/v1",
+        gateway_base="https://gateway.example/v1",
         gateway_key="sk-test-virtual-key-123456",
         data_dir=str(tmp_path),
+        config_path=str(config_path),
         embedding_dimensions=32,
         _env_file=None,
     )
     mock_gw = DeterministicMockGateway(settings)
     container = ServiceContainer(settings=settings, gateway=mock_gw)
 
-    # Create synthetic multi-intent dataset in raw_dir to run offline
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     intents = [
@@ -248,7 +251,6 @@ def test_end_to_end_service_and_fastapi_mvc_controllers(tmp_path: Path) -> None:
     app = create_app(container)
     client = TestClient(app)
 
-    # Health and provider switching
     r_health = client.get("/health")
     assert r_health.status_code == 200
     assert r_health.json()["status"] == "healthy"
@@ -266,12 +268,10 @@ def test_end_to_end_service_and_fastapi_mvc_controllers(tmp_path: Path) -> None:
     )
     assert r_switch_bad.status_code == 400
 
-    # Cluster inspection
     r_clu = client.get("/api/v1/clusters")
     assert r_clu.status_code == 200
     assert r_clu.json()["cluster_count"] >= 3
 
-    # Single ticket classification with provider override
     r_clf = client.post(
         "/api/v1/classify",
         json={
@@ -286,7 +286,6 @@ def test_end_to_end_service_and_fastapi_mvc_controllers(tmp_path: Path) -> None:
     assert body["provider_used"] == "openai"
     assert body["confidence"] > 0.0
 
-    # Batch classification
     r_batch = client.post(
         "/api/v1/classify/batch",
         json={
@@ -303,11 +302,10 @@ def test_end_to_end_service_and_fastapi_mvc_controllers(tmp_path: Path) -> None:
     assert r_batch.status_code == 200
     assert len(r_batch.json()) == 2
 
-    # Visual artifact and markdown report rendering
     plots = container.report_view.save_plots(metrics)
     assert "clusters_2d_plot" in plots
     assert "confusion_matrix_plot" in plots
-    report_file = tmp_path / "BENCHMARK_REPORT.md"
+    report_file = tmp_path / "fit-report.md"
     md_text = container.report_view.render_markdown_report(
         metrics, plot_paths=plots, report_path=report_file
     )
@@ -336,23 +334,27 @@ def test_dataset_repo_formats_and_density_alignment(tmp_path: Path) -> None:
     assert len(df_cfpb) == 1
     assert df_cfpb.iloc[0]["label"] == "Card"
 
-    # Test density clustering & Hungarian centroid re-alignment
     rng = np.random.default_rng(7)
     X = np.vstack([rng.normal(1.0, 0.02, (12, 4)), rng.normal(-1.0, 0.02, (12, 4))])
     dens_engine = ClusteringEngine(strategy="density", k_min=2, k_max=4, n_components=2)
     labels1, _ = dens_engine.fit_transform(X)
     assert len(labels1) == 24
-    # Second fit triggers Hungarian centroid alignment against existing centroids_
+
     labels2, _ = dens_engine.fit_transform(X)
     assert len(labels2) == 24
 
 
 def test_model_registry_persistence_and_startup_reload(tmp_path: Path) -> None:
-    """Verify that fitted pipeline state persists to model_registry.joblib and auto-reloads on container restart."""
+    """Verify versioned state and the active release pointer reload on process restart."""
+    config_path = tmp_path / "pipeline.yaml"
+    config = AppSettings(_env_file=None).load_pipeline_yaml()
+    config["release"] = SYNTHETIC_RELEASE_POLICY
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
     settings = AppSettings(
-        gateway_base="https://82.70.210.36.sslip.io/v1",
+        gateway_base="https://gateway.example/v1",
         gateway_key="sk-test-virtual-key-123456",
         data_dir=str(tmp_path),
+        config_path=str(config_path),
         embedding_dimensions=32,
         _env_file=None,
     )
@@ -390,16 +392,17 @@ def test_model_registry_persistence_and_startup_reload(tmp_path: Path) -> None:
         k_max=4,
         use_llm_naming=False,
     )
-    registry_file = tmp_path / "artifacts" / "model_registry.joblib"
-    assert registry_file.is_file()
+    registry = container1.model_registry_repo
+    assert registry.release_record_path.is_file()
+    assert registry.version_path(
+        registry.get_release_record()["active_version"]
+    ).is_file()
 
-    # Create a fresh container simulating process restart
     container2 = ServiceContainer(settings=settings, gateway=mock_gw)
     assert container2.pipeline_service.clustering_engine is not None
     assert container2.pipeline_service.classifier_suite is not None
     assert len(container2.pipeline_service.cluster_profiles) >= 2
 
-    # Verify classification endpoint works immediately without refitting
     app2 = create_app(container2)
     client2 = TestClient(app2)
     resp = client2.post(
@@ -417,7 +420,7 @@ def test_llm_gateway_adapter_json_fence_and_dimensions() -> None:
     from ticket_classification.gateways.llm_gateway_adapter import LLMGatewaySDKAdapter
 
     settings = AppSettings(
-        gateway_base="https://82.70.210.36.sslip.io/v1",
+        gateway_base="https://gateway.example/v1",
         gateway_key="sk-test-virtual-key-123456",
         _env_file=None,
     )
@@ -436,12 +439,11 @@ def test_llm_gateway_adapter_json_fence_and_dimensions() -> None:
 
     vecs = adapter.embed_texts(["sample text"])
     assert vecs == [[0.1, 0.2, 0.3]]
-    # Ensure dimensions wasn't forced to 1536 when settings.embedding_dimensions is None
+
     assert mock_client.embed.call_args.kwargs.get("dimensions") is None
 
-    # When explicitly configured, verify dimensions is forwarded
     settings_with_dims = AppSettings(
-        gateway_base="https://82.70.210.36.sslip.io/v1",
+        gateway_base="https://gateway.example/v1",
         gateway_key="sk-test-virtual-key-123456",
         embedding_dimensions=768,
         _env_file=None,

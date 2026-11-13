@@ -1,16 +1,23 @@
-"""Gateway Adapter wrapping eslam-aboutaleb/llm-gateway-sdk with switchable providers."""
+"""Gateway Adapter wrapping eslam-aboutaleb/llm-gateway-sdk with switchable providers, persistent pooling, and bounded concurrency."""
 
 from __future__ import annotations
 
 import json
+import math
+import random
 import re
+import time
 from abc import ABC, abstractmethod
+from collections import deque
+from threading import RLock, Semaphore
 from typing import TypeVar
 
 from llm_gateway_sdk import GatewayClient
+from llm_gateway_sdk.exceptions import GatewaySDKError
 from pydantic import BaseModel
 
 from ticket_classification.config.settings import AppSettings, LLMProvider, ModelTier
+from ticket_classification.services.telemetry import TelemetryCollector
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -45,22 +52,87 @@ class BaseCloudGateway(ABC):
     ) -> T:
         """Execute a structured JSON completion validated against a Pydantic schema."""
 
+    def close(self) -> None:
+        """Release any pooled network connections."""
+
 
 class LLMGatewaySDKAdapter(BaseCloudGateway):
-    """Concrete Gateway Adapter powered by eslam-aboutaleb/llm-gateway-sdk."""
+    """Concrete Gateway Adapter powered by eslam-aboutaleb/llm-gateway-sdk with connection reuse and bounded concurrency."""
 
     def __init__(
         self,
         settings: AppSettings,
         client: GatewayClient | None = None,
+        max_concurrency: int = 4,
+        max_requests_per_minute: int = 600,
+        max_retries: int = 2,
+        telemetry: TelemetryCollector | None = None,
     ) -> None:
         self.settings = settings
         self._client = client
+        self._owns_client = False
+        self._lock = RLock()
+        self._semaphore = Semaphore(max(1, max_concurrency))
+        self.max_requests_per_minute = max(1, max_requests_per_minute)
+        self.max_retries = max(0, max_retries)
+        self._request_timestamps: deque[float] = deque()
+        self.telemetry = telemetry
 
     def _get_client(self) -> GatewayClient:
-        if self._client is not None:
+        with self._lock:
+            if self._client is None:
+                self._client = self.settings.create_gateway_client()
+                self._owns_client = True
             return self._client
-        return self.settings.create_gateway_client()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._owns_client and self._client is not None:
+                close_fn = getattr(self._client, "close", None)
+                if callable(close_fn):
+                    close_fn()
+                self._client = None
+                self._owns_client = False
+
+    def _check_budget(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            while (
+                self._request_timestamps and now - self._request_timestamps[0] >= 60.0
+            ):
+                self._request_timestamps.popleft()
+            if len(self._request_timestamps) >= self.max_requests_per_minute:
+                if self.telemetry:
+                    self.telemetry.inc("provider_throttled")
+                raise RuntimeError("Provider request budget exceeded; retry later")
+            self._request_timestamps.append(now)
+
+    def _call_with_retry(self, fn):
+        with self._semaphore:
+            attempt = 0
+            while True:
+                self._check_budget()
+                try:
+                    return fn()
+                except GatewaySDKError as exc:
+                    status_code = getattr(exc, "status_code", None)
+                    transient = status_code in {None, 408, 429, 500, 502, 503, 504}
+                    if attempt >= self.max_retries or not transient:
+                        if self.telemetry:
+                            self.telemetry.inc("provider_failures")
+                        raise
+                    attempt += 1
+                    if self.telemetry:
+                        self.telemetry.inc("provider_retries")
+                    retry_after = getattr(exc, "retry_after", None)
+                    delay = (
+                        float(retry_after)
+                        if retry_after is not None
+                        else min(2.0, (0.05 * (2**attempt)) + random.uniform(0.0, 0.05))
+                    )
+                    time.sleep(
+                        min(10.0, max(0.0, delay)) if math.isfinite(delay) else 2.0
+                    )
 
     def switch_provider(self, provider: LLMProvider | str) -> None:
         """Dynamically switch active provider between 'litellm', 'openai', and 'gemini'."""
@@ -83,12 +155,11 @@ class LLMGatewaySDKAdapter(BaseCloudGateway):
             ModelTier.EMBEDDING, provider_override=provider_override
         )
         dims = self.settings.embedding_dimensions
-        if self._client is not None:
-            resp = self._client.embed(input=texts, model=model, dimensions=dims)
-            return resp.vectors
-        with self.settings.create_gateway_client() as client:
-            resp = client.embed(input=texts, model=model, dimensions=dims)
-            return resp.vectors
+        client = self._get_client()
+        resp = self._call_with_retry(
+            lambda: client.embed(input=texts, model=model, dimensions=dims)
+        )
+        return resp.vectors
 
     def complete_structured(
         self,
@@ -110,23 +181,15 @@ class LLMGatewaySDKAdapter(BaseCloudGateway):
             {"role": "user", "content": user_prompt},
         ]
 
-        if self._client is not None:
-            resp = self._client.complete(
+        client = self._get_client()
+        resp = self._call_with_retry(
+            lambda: client.complete(
                 model=model,
                 messages=messages,
                 temperature=0.0,
                 response_format={"type": "json_object"},
             )
-            raw_content = resp.content or "{}"
-        else:
-            with self.settings.create_gateway_client() as client:
-                resp = client.complete(
-                    model=model,
-                    messages=messages,
-                    temperature=0.0,
-                    response_format={"type": "json_object"},
-                )
-                raw_content = resp.content or "{}"
-
+        )
+        raw_content = resp.content or "{}"
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_content.strip())
         return schema_cls.model_validate_json(cleaned)

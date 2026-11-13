@@ -21,10 +21,10 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="CSV, JSON records or JSONL input; columns come from the domain profile",
     )
-    parser.add_argument("--config", default="configs/pipeline_config.yaml")
+    parser.add_argument("--config", default=None)
     parser.add_argument(
         "--domain-id",
-        default="generic",
+        default=None,
         help="Built-in or configured domain profile ID",
     )
     parser.add_argument("--domain", help="Optional context override for naming")
@@ -47,12 +47,20 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="JSON array of domain-appropriate unknown-intent probe texts",
     )
-    parser.add_argument("--report-path", default="BENCHMARK_REPORT.md")
+    parser.add_argument("--report-path", default=None)
     args = parser.parse_args(argv)
-    options = {"config_path": args.config, "domain_id": args.domain_id}
+    options = {
+        key: value
+        for key, value in {
+            "config_path": args.config,
+            "domain_id": args.domain_id,
+        }.items()
+        if value is not None
+    }
     if args.domain:
         options["domain_context"] = args.domain
-    container = ServiceContainer(settings=AppSettings(**options))
+    settings = AppSettings(**options)
+    container = ServiceContainer(settings=settings)
     service = container.pipeline_service
     if args.provider:
         service.switch_provider(args.provider)
@@ -84,7 +92,10 @@ def main(argv: list[str] | None = None) -> int:
         container.report_view.save_plots(metrics) if metrics.get("evaluated") else {}
     )
     container.report_view.render_markdown_report(
-        metrics, plot_paths=plots, report_path=args.report_path
+        metrics,
+        plot_paths=plots,
+        report_path=args.report_path
+        or Path(settings.data_dir) / "reports" / "fit-report.md",
     )
     print(
         json.dumps(

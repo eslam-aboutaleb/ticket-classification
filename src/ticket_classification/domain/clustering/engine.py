@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-from sklearn.cluster import DBSCAN, HDBSCAN, KMeans
+from sklearn.cluster import DBSCAN, HDBSCAN, KMeans, MiniBatchKMeans
 from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics import adjusted_rand_score, silhouette_score
@@ -39,6 +41,9 @@ class ClusteringEngine(
         silhouette_sample_size: int = 1000,
         recover_noise: bool = False,
         single_cluster_min_similarity: float = 0.75,
+        max_discovery_samples: int = 5000,
+        max_work_budget_seconds: float = 60.0,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__()
         if strategy not in {"aligned_kmeans", "hdbscan_density", "density"}:
@@ -59,6 +64,11 @@ class ClusteringEngine(
             recover_noise,
             single_cluster_min_similarity,
         )
+        self.max_discovery_samples = max_discovery_samples
+        self.max_work_budget_seconds = max_work_budget_seconds
+        self.cancel_check = cancel_check
+        self.diagnostics_: dict[str, Any] = {}
+        self._strata_hints: list[str] | None = None
         self._projector: Any = None
         self.centroids_: np.ndarray | None = None
         self.raw_space_centroids_: np.ndarray | None = None
@@ -69,7 +79,63 @@ class ClusteringEngine(
         self.best_silhouette_ = 0.0
         self.silhouette_history_: dict[int, float] = {}
         self.last_alignment_: AlignmentResult | None = None
-        self.diagnostics_: dict[str, Any] = {}
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = self.__dict__.copy()
+        state["cancel_check"] = None
+        return state
+
+    def fit_transform(
+        self,
+        train_data: np.ndarray,
+        strata_hints: list[str] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        self._strata_hints = strata_hints
+        try:
+            self.fit(train_data)
+        finally:
+            self._strata_hints = None
+        return self.train_labels_.copy(), self.train_strengths_.copy()
+
+    def _select_representative_indices(self, n_rows: int) -> tuple[np.ndarray, bool]:
+        if n_rows <= self.max_discovery_samples:
+            return np.arange(n_rows), False
+        rng = np.random.default_rng(self.random_state)
+        if not self._strata_hints or len(self._strata_hints) != n_rows:
+            chosen = np.sort(
+                rng.choice(n_rows, size=self.max_discovery_samples, replace=False)
+            )
+            return chosen, True
+
+        # Preserve rare-language/stratum evidence in sampled discovery
+        by_stratum: dict[str, list[int]] = {}
+        for idx, hint in enumerate(self._strata_hints):
+            by_stratum.setdefault(str(hint), []).append(idx)
+        selected: list[int] = []
+        remaining_pool: list[int] = []
+        min_per_stratum = max(
+            self.min_cluster_support * 2,
+            min(25, self.max_discovery_samples // max(1, len(by_stratum))),
+        )
+        for indices in by_stratum.values():
+            arr = np.asarray(indices, dtype=int)
+            if len(arr) <= min_per_stratum:
+                selected.extend(arr.tolist())
+            else:
+                perm = rng.permutation(arr)
+                selected.extend(perm[:min_per_stratum].tolist())
+                remaining_pool.extend(perm[min_per_stratum:].tolist())
+        needed = self.max_discovery_samples - len(selected)
+        if needed > 0 and remaining_pool:
+            extra = rng.choice(
+                np.asarray(remaining_pool, dtype=int),
+                size=min(needed, len(remaining_pool)),
+                replace=False,
+            )
+            selected.extend(extra.tolist())
+        return np.sort(
+            np.asarray(selected[: self.max_discovery_samples], dtype=int)
+        ), True
 
     def _project_embeddings(self, embeddings: np.ndarray, is_fit: bool) -> np.ndarray:
         data = np.asarray(embeddings, dtype=float)
@@ -120,10 +186,6 @@ class ClusteringEngine(
         self.projected_width_ = projected.shape[1]
         return projected
 
-    def fit_transform(self, train_data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        self.fit(train_data)
-        return self.train_labels_.copy(), self.train_strengths_.copy()
-
     def _quality(self, original: np.ndarray, labels: np.ndarray) -> tuple[float, float]:
         valid = labels >= 0
         groups, counts = np.unique(labels[valid], return_counts=True)
@@ -151,19 +213,22 @@ class ClusteringEngine(
     def predict_k_with_dropout_and_silhouette(
         self, projected: np.ndarray
     ) -> tuple[int, float]:
-        """Adaptive K-Means baseline; method name retained for source compatibility."""
+        """Adaptive K-Means baseline with bounded work budget and sample-aware evaluation."""
         original = self._fit_original
-        unique_count = len(np.unique(projected, axis=0))
+        sample_idx, is_sampled = self._select_representative_indices(len(projected))
+        proj_sub = projected[sample_idx]
+        orig_sub = original[sample_idx]
+        unique_count = len(np.unique(proj_sub, axis=0))
         feasible = min(
             unique_count,
-            max(1, len(projected) // self.min_cluster_support),
-            len(projected) - 1,
+            max(1, len(proj_sub) // self.min_cluster_support),
+            len(proj_sub) - 1,
         )
         if feasible < 2:
             return 1, 0.0
         lower = min(self.k_min or 2, feasible)
         # This is an explicit compute ceiling, not a claimed upper bound on true intents.
-        upper = min(self.k_max or feasible, feasible)
+        upper = min(self.k_max or min(feasible, 256), feasible)
         candidates = set(
             np.geomspace(
                 lower, upper, min(max(2, self.candidate_budget // 2), upper - lower + 1)
@@ -172,27 +237,55 @@ class ClusteringEngine(
             .astype(int)
         )
         evaluated: dict[int, tuple[float, float, float]] = {}
+        t_start = time.perf_counter()
+        time_budget_hit = False
+        use_minibatch = len(proj_sub) >= 2000 or is_sampled
 
         def evaluate(k: int) -> None:
+            nonlocal time_budget_hit
+            if self.cancel_check and self.cancel_check():
+                raise RuntimeError("Discovery job cancelled")
             if (
                 k in evaluated
                 or len(evaluated) >= self.candidate_budget
                 or not lower <= k <= upper
             ):
                 return
-            km = KMeans(n_clusters=k, n_init=5, random_state=self.random_state).fit(
-                projected
-            )
-            other = KMeans(
-                n_clusters=k, n_init=3, random_state=self.random_state + 1
-            ).fit(projected)
-            quality, separation = self._quality(original, km.labels_)
+            if (
+                evaluated
+                and (time.perf_counter() - t_start) >= self.max_work_budget_seconds
+            ):
+                time_budget_hit = True
+                return
+            if use_minibatch or k > 64:
+                km = MiniBatchKMeans(
+                    n_clusters=k,
+                    n_init=3,
+                    batch_size=min(1024, len(proj_sub)),
+                    random_state=self.random_state,
+                ).fit(proj_sub)
+                other = MiniBatchKMeans(
+                    n_clusters=k,
+                    n_init=3,
+                    batch_size=min(1024, len(proj_sub)),
+                    random_state=self.random_state + 1,
+                ).fit(proj_sub)
+            else:
+                km = KMeans(n_clusters=k, n_init=5, random_state=self.random_state).fit(
+                    proj_sub
+                )
+                other = KMeans(
+                    n_clusters=k, n_init=3, random_state=self.random_state + 1
+                ).fit(proj_sub)
+            quality, separation = self._quality(orig_sub, km.labels_)
             stability = float(adjusted_rand_score(km.labels_, other.labels_))
             evaluated[k] = (quality + 0.1 * stability, separation, stability)
 
         for k in sorted(candidates):
             evaluate(int(k))
-        while len(evaluated) < self.candidate_budget:
+            if time_budget_hit:
+                break
+        while len(evaluated) < self.candidate_budget and not time_budget_hit:
             best = max(evaluated, key=lambda k: evaluated[k][0])
             ordered = sorted(evaluated)
             neighbors = [lower - 1, *ordered, upper + 1]
@@ -204,6 +297,8 @@ class ClusteringEngine(
             before = len(evaluated)
             for k in additions:
                 evaluate(k)
+                if time_budget_hit:
+                    break
             if len(evaluated) == before:
                 break
         best = max(evaluated, key=lambda k: evaluated[k][0])
@@ -215,7 +310,13 @@ class ClusteringEngine(
         self.diagnostics_.update(
             candidate_bounds=[lower, upper],
             candidate_budget=self.candidate_budget,
-            budget_exhausted=len(evaluated) >= self.candidate_budget,
+            budget_exhausted=len(evaluated) >= self.candidate_budget or time_budget_hit,
+            time_budget_hit=time_budget_hit,
+            discovery_mode="sampled" if is_sampled else "full_data",
+            discovery_sample_size=len(proj_sub),
+            approximation="minibatch_kmeans"
+            if (use_minibatch or best > 64)
+            else "exact_kmeans",
             candidates=[
                 {"k": k, "score": v[0], "silhouette": v[1], "seed_stability_ari": v[2]}
                 for k, v in sorted(evaluated.items())
@@ -291,12 +392,27 @@ class ClusteringEngine(
             k, self.best_silhouette_ = self.predict_k_with_dropout_and_silhouette(
                 projected
             )
-            km = KMeans(n_clusters=k, n_init=10, random_state=self.random_state).fit(
-                projected
-            )
+            if len(projected) > self.max_discovery_samples or k > 64:
+                km = MiniBatchKMeans(
+                    n_clusters=k,
+                    n_init=5,
+                    batch_size=min(1024, len(projected)),
+                    random_state=self.random_state,
+                ).fit(projected)
+            else:
+                km = KMeans(
+                    n_clusters=k, n_init=10, random_state=self.random_state
+                ).fit(projected)
             labels = km.labels_
             centers = normalize(
-                np.vstack([original[labels == c].mean(axis=0) for c in range(k)])
+                np.vstack(
+                    [
+                        original[labels == c].mean(axis=0)
+                        if np.any(labels == c)
+                        else np.zeros(original.shape[1])
+                        for c in range(k)
+                    ]
+                )
             )
             strengths = np.sum(original * centers[labels], axis=1).clip(0, 1)
             labels[strengths < self.outlier_recovery_threshold * 0.65] = -1
@@ -305,33 +421,52 @@ class ClusteringEngine(
                 eps=0.35, min_samples=self.min_cluster_support, metric="cosine"
             ).fit_predict(normalize(projected))
             strengths = (labels >= 0).astype(float)
+            self.diagnostics_["discovery_mode"] = "full_data"
+            self.diagnostics_["discovery_sample_size"] = len(projected)
+            self.diagnostics_["time_budget_hit"] = False
         else:
+            sample_idx, is_sampled = self._select_representative_indices(len(projected))
+            proj_sub = projected[sample_idx]
+            orig_sub = original[sample_idx]
             best_score = -np.inf
             sizes = sorted(
                 {
                     self.min_cluster_support,
-                    max(self.min_cluster_support, int(np.sqrt(len(projected)))),
-                    max(self.min_cluster_support, len(projected) // 20),
+                    max(self.min_cluster_support, int(np.sqrt(len(proj_sub)))),
+                    max(self.min_cluster_support, len(proj_sub) // 20),
                 }
             )
             trials = []
+            t_start = time.perf_counter()
+            time_budget_hit = False
+            best_sub_labels: np.ndarray | None = None
+            best_sub_strengths: np.ndarray | None = None
             for size in sizes:
-                if size > len(projected):
+                if size > len(proj_sub):
                     continue
                 for samples in sorted({2, min(size, 5)}):
+                    if self.cancel_check and self.cancel_check():
+                        raise RuntimeError("Discovery job cancelled")
                     if len(trials) >= self.candidate_budget:
+                        break
+                    if (
+                        trials
+                        and (time.perf_counter() - t_start)
+                        >= self.max_work_budget_seconds
+                    ):
+                        time_budget_hit = True
                         break
                     model = HDBSCAN(
                         min_cluster_size=size,
                         min_samples=samples,
                         allow_single_cluster=False,
                         copy=True,
-                    ).fit(projected)
-                    score, separation = self._quality(original, model.labels_)
+                    ).fit(proj_sub)
+                    score, separation = self._quality(orig_sub, model.labels_)
                     subset = np.sort(
                         np.random.default_rng(self.random_state).choice(
-                            len(projected),
-                            max(size, int(len(projected) * 0.8)),
+                            len(proj_sub),
+                            max(size, int(len(proj_sub) * 0.8)),
                             replace=False,
                         )
                     )
@@ -340,7 +475,7 @@ class ClusteringEngine(
                         min_samples=samples,
                         allow_single_cluster=False,
                         copy=True,
-                    ).fit_predict(projected[subset])
+                    ).fit_predict(proj_sub[subset])
                     stability = float(
                         adjusted_rand_score(model.labels_[subset], repeated)
                     )
@@ -357,14 +492,44 @@ class ClusteringEngine(
                         }
                     )
                     if score > best_score:
-                        best_score, labels, strengths = (
-                            score,
-                            model.labels_.copy(),
-                            model.probabilities_.copy(),
-                        )
+                        best_score = score
+                        best_sub_labels = model.labels_.copy()
+                        best_sub_strengths = model.probabilities_.copy()
                         self.best_silhouette_ = separation
+                if time_budget_hit:
+                    break
+            if best_sub_labels is not None and best_sub_strengths is not None:
+                if is_sampled:
+                    sub_groups = sorted(set(best_sub_labels) - {-1})
+                    if sub_groups:
+                        sub_centers = normalize(
+                            np.vstack(
+                                [
+                                    orig_sub[best_sub_labels == c].mean(axis=0)
+                                    for c in sub_groups
+                                ]
+                            )
+                        )
+                        sims = original @ sub_centers.T
+                        strengths = np.max(sims, axis=1).clip(0, 1)
+                        labels = np.where(
+                            strengths >= self.outlier_recovery_threshold * 0.65,
+                            sims.argmax(axis=1),
+                            -1,
+                        )
+                        labels[sample_idx] = best_sub_labels
+                        strengths[sample_idx] = best_sub_strengths
+                else:
+                    labels, strengths = best_sub_labels, best_sub_strengths
             self.diagnostics_["candidates"] = trials
-            self.diagnostics_["budget_exhausted"] = len(trials) >= self.candidate_budget
+            self.diagnostics_["budget_exhausted"] = (
+                len(trials) >= self.candidate_budget or time_budget_hit
+            )
+            self.diagnostics_["time_budget_hit"] = time_budget_hit
+            self.diagnostics_["discovery_mode"] = (
+                "sampled" if is_sampled else "full_data"
+            )
+            self.diagnostics_["discovery_sample_size"] = len(proj_sub)
             if not np.any(labels >= 0):
                 center = normalize(original.mean(axis=0, keepdims=True))[0]
                 if (
@@ -435,6 +600,47 @@ class ClusteringEngine(
         return np.where(
             strengths >= self.outlier_recovery_threshold * 0.65, sims.argmax(axis=1), -1
         ), strengths
+
+    def compact_for_serving(self) -> ClusteringEngine:
+        """Return a lightweight serving copy preserving frozen centroids and diagnostics without large reducer/training graphs."""
+        clone = ClusteringEngine(
+            strategy=self.strategy,
+            k_min=self.k_min,
+            k_max=self.k_max,
+            n_components=self.n_components,
+            outlier_recovery_threshold=self.outlier_recovery_threshold,
+            random_state=self.random_state,
+            reducer=self.reducer,
+            min_cluster_support=self.min_cluster_support,
+            candidate_budget=self.candidate_budget,
+            silhouette_sample_size=self.silhouette_sample_size,
+            recover_noise=self.recover_noise,
+            single_cluster_min_similarity=self.single_cluster_min_similarity,
+            max_discovery_samples=self.max_discovery_samples,
+            max_work_budget_seconds=self.max_work_budget_seconds,
+        )
+        clone._is_fitted = self._is_fitted
+        clone.input_width_ = getattr(self, "input_width_", 0)
+        clone.projected_width_ = getattr(self, "projected_width_", 0)
+        clone._projector = None
+        clone.centroids_ = (
+            self.centroids_.astype(np.float32) if self.centroids_ is not None else None
+        )
+        clone.raw_space_centroids_ = (
+            self.raw_space_centroids_.astype(np.float32)
+            if self.raw_space_centroids_ is not None
+            else None
+        )
+        clone.train_labels_ = None
+        clone.train_strengths_ = None
+        clone.optimal_k_ = self.optimal_k_
+        clone.dropout_viable_k_ = self.dropout_viable_k_
+        clone.hit_k_max_boundary_ = self.hit_k_max_boundary_
+        clone.best_silhouette_ = self.best_silhouette_
+        clone.silhouette_history_ = dict(self.silhouette_history_)
+        clone.last_alignment_ = self.last_alignment_
+        clone.diagnostics_ = dict(self.diagnostics_)
+        return clone
 
     def project_2d(self, embeddings: np.ndarray) -> np.ndarray:
         if len(embeddings) < 3 or embeddings.shape[1] < 2:

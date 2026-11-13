@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import yaml
+from conftest import SYNTHETIC_RELEASE_POLICY
 from fastapi.testclient import TestClient
 
 from ticket_classification.config.settings import AppSettings, LLMProvider
@@ -60,6 +61,7 @@ class MultilingualGateway(BaseCloudGateway):
 @pytest.fixture
 def setup(tmp_path):
     config = {
+        "release": SYNTHETIC_RELEASE_POLICY,
         "classification": {
             "enable_llm_reranker": False,
             "lexical_weight": 0.0,

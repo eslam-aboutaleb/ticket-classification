@@ -45,6 +45,8 @@ dev = [
 
 [project.scripts]
 ticket-clf = "ticket_classification.controllers.cli:main"
+ticket-api = "ticket_classification.controllers.server:main"
+ticket-worker = "ticket_classification.controllers.worker:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -55,3 +57,6 @@ packages = ["src/ticket_classification"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/configs", "/scripts", "/docs", "/README.md", "/Dockerfile", "/compose.yaml", "/.dockerignore", "/.env.example", "/pyproject.toml", "/uv.lock"]

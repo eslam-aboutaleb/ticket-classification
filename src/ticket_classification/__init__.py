@@ -1,3 +1,3 @@
-"""Cloud-Native Ticket & Claim Clustering and Classification Package."""
+"""Multilingual ticket and claim discovery and classification."""
 
 __version__ = "0.1.0"

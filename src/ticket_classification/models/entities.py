@@ -1,4 +1,4 @@
-"""Domain entities and value objects for the MVC Model layer."""
+"""Ticket records, discovered categories and prediction results."""
 
 from __future__ import annotations
 

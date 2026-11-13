@@ -1,4 +1,4 @@
-"""MVC View Layer: Generates visual plots (2D cluster projections, confusion matrices) and Markdown reports."""
+"""Evaluation plots and user-facing fit reports."""
 
 from __future__ import annotations
 
@@ -6,12 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
 
 
 class ReportAndPlotView:
@@ -23,6 +18,12 @@ class ReportAndPlotView:
 
     def save_plots(self, metrics: dict[str, Any]) -> dict[str, str]:
         """Save 2D PCA/UMAP scatterplots (by cluster & ground-truth) and confusion matrix."""
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
         plot_data = metrics.get("_plot_data", {})
         coords = np.array(plot_data.get("coords_2d", []))
         clusters = np.array(plot_data.get("train_clusters", []))
@@ -89,9 +90,9 @@ class ReportAndPlotView:
         self,
         metrics: dict[str, Any],
         plot_paths: dict[str, str] | None = None,
-        report_path: str | Path = "BENCHMARK_REPORT.md",
+        report_path: str | Path = "data/reports/fit-report.md",
     ) -> str:
-        """Generate a comprehensive Markdown benchmark report following ML Best Practices."""
+        """Write an evaluation report with discovery and classifier metrics."""
         clu = metrics["clustering"]
         clf = metrics["classification"]
         emb = metrics["embedding_stats"]
@@ -143,7 +144,6 @@ class ReportAndPlotView:
                 f"| `C{c['cluster_id']}` | {c['size']} | **{c['short_label']}** | `{c['routing_queue']}` | `{kws}` | {c['signature']} |"
             )
 
-        # Check if true ground truth metrics were computed
         has_gt_eval = any(
             "test_ground_truth_accuracy" in m for m in clf["model_comparison"].values()
         )
@@ -216,6 +216,25 @@ class ReportAndPlotView:
             ]
         )
 
+        open_set = slices.get("open_set_evaluation", {})
+        if open_set:
+            lines.extend(
+                [
+                    f"- **Open-set AUROC:** `{open_set.get('auroc', 'N/A')}`",
+                    f"- **Known test cohort:** `{open_set.get('known_test_count', 0)}` (all in-domain test records)",
+                    "",
+                    "| Calibration quantile | Known false positives | Known FPR | OOS detected | OOS recall |",
+                    "| --- | --- | --- | --- | --- |",
+                ]
+            )
+            for point in open_set.get("operating_points", []):
+                lines.append(
+                    f"| {point['calibration_quantile']} | {point['known_false_positive_count']}/{point['known_test_count']} | {point['known_false_positive_rate']:.4%} | {point['oos_true_positive_count']}/{point['oos_test_count']} | {point['oos_recall']:.4%} |"
+                )
+            lines.append(
+                "\nThresholds use held-out known validation examples; OOS test probes are used only for final evaluation."
+            )
+
         if plot_paths:
             lines.extend(
                 [
@@ -227,5 +246,7 @@ class ReportAndPlotView:
             )
 
         content = "\n".join(lines) + "\n"
-        Path(report_path).write_text(content, encoding="utf-8")
+        path = Path(report_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
         return content

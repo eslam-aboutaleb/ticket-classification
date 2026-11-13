@@ -15,7 +15,7 @@ class Policy(BaseModel):
 
 
 class LanguagePolicy(Policy):
-    supported: list[str] = Field(default_factory=lambda: ["en", "ar"])
+    supported: list[str] = Field(default_factory=lambda: ["en", "ar"], min_length=1)
     detector: str = "langdetect"
     tokenizer: str = "unicode"
     normalization: Literal["NFC", "NFKC"] = "NFC"
@@ -71,6 +71,7 @@ class DomainProfile(Policy):
     group_col: str | None = None
     timestamp_col: str | None = None
     split_mode: Literal["grouped", "temporal"] = "grouped"
+    cross_split_duplicates: Literal["error", "prefer_holdout"] = "error"
     cleaning: CleaningPolicy = Field(default_factory=CleaningPolicy)
     language: LanguagePolicy = Field(default_factory=LanguagePolicy)
     metadata: MetadataPolicy = Field(default_factory=MetadataPolicy)
@@ -91,6 +92,53 @@ class DomainProfile(Policy):
         return hashlib.sha256(
             json.dumps(self.model_dump(), sort_keys=True).encode()
         ).hexdigest()
+
+    def semantic_fingerprint(self) -> str:
+        """Fingerprint ONLY the semantic preprocessing inputs that affect contextual embeddings."""
+        payload = {
+            "cleaning": {
+                "strip_email_headers": self.cleaning.strip_email_headers,
+                "strip_disclaimers": self.cleaning.strip_disclaimers,
+                "mask_pii": self.cleaning.mask_pii,
+                "normalize_redactions": self.cleaning.normalize_redactions,
+                "pii_patterns": self.cleaning.pii_patterns,
+                "boilerplate_patterns": self.cleaning.boilerplate_patterns,
+            },
+            "normalization": self.language.normalization,
+            "chunk_chars": self.chunk_chars,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    def lexical_fingerprint(self) -> str:
+        """Fingerprint lexical tokenization, stopwords, and script normalization."""
+        payload = {
+            "semantic": self.semantic_fingerprint(),
+            "min_token_length": self.cleaning.min_token_length,
+            "language": {
+                "supported": sorted(self.language.supported),
+                "detector": self.language.detector,
+                "tokenizer": self.language.tokenizer,
+                "min_detection_chars": self.language.min_detection_chars,
+                "min_detection_confidence": self.language.min_detection_confidence,
+                "lexical_plugins": self.language.lexical_plugins,
+                "extra_stopwords": self.language.extra_stopwords,
+                "preserve_tokens": sorted(self.language.preserve_tokens),
+                "arabic_remove_diacritics": self.language.arabic_remove_diacritics,
+                "arabic_fold_alef": self.language.arabic_fold_alef,
+            },
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    def presentation_fingerprint(self) -> str:
+        """Fingerprint routing labels, queues, and display configuration."""
+        payload = {
+            "context": self.context,
+            "routes": self.routes,
+            "default_route": self.default_route,
+            "review_queue": self.review_queue,
+            "display_language": self.language.display_language,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 class ClusteringPolicy(Policy):
@@ -115,6 +163,8 @@ class ClusteringPolicy(Policy):
     outlier_recovery_threshold: float = Field(default=0.55, ge=0, le=1)
     recover_noise: bool = False
     single_cluster_min_similarity: float = Field(default=0.75, ge=0, le=1)
+    max_discovery_samples: int = Field(default=5000, ge=50)
+    max_work_budget_seconds: float = Field(default=60.0, gt=0)
 
     @model_validator(mode="after")
     def valid_bounds(self) -> ClusteringPolicy:
@@ -127,16 +177,53 @@ class ClassificationPolicy(Policy):
     pseudo_label_confidence_quantile: float = Field(default=0.10, ge=0, le=1)
     min_data_per_class: int = Field(default=3, ge=1)
     open_set_distance_quantile: float = Field(default=0.96, gt=0, le=1)
+    min_calibration_samples: int = Field(default=8, ge=1)
     ambiguous_margin_threshold: float = Field(default=0.12, ge=0, le=1)
     enable_llm_reranker: bool = True
     lexical_weight: float = Field(default=0.25, ge=0)
     metadata_weight: float = Field(default=0.05, ge=0)
+    candidate_models: list[str] = Field(
+        default_factory=lambda: [
+            "naive_majority",
+            "logistic_regression",
+            "calibrated_linear_svc",
+            "gradient_boosting",
+            "frozen_prototype",
+        ]
+    )
+    export_compact_serving_bundle: bool = True
 
 
 class EmbeddingPolicy(Policy):
     batch_size: int = Field(default=64, ge=1)
+    max_concurrency: int = Field(default=4, ge=1)
+    dtype: Literal["float32", "float64"] = "float32"
     cache_db_path: str = "cache/embeddings_cache.sqlite"
     multilingual: bool = True
+
+
+class AdmissionPolicy(Policy):
+    max_request_bytes: int = Field(default=2_097_152, ge=1024)
+    max_text_chars: int = Field(default=32_000, ge=100)
+    max_metadata_keys: int = Field(default=64, ge=1)
+    max_metadata_bytes: int = Field(default=16_384, ge=128)
+    max_batch_size: int = Field(default=256, ge=1)
+    max_fit_records: int = Field(default=50_000, ge=1)
+    max_oos_probes: int = Field(default=1_000, ge=1)
+    max_concurrent_jobs_per_tenant: int = Field(default=2, ge=1)
+    provider_request_budget_per_minute: int = Field(default=600, ge=1)
+
+
+class ReleasePolicy(Policy):
+    require_evaluation: bool = True
+    require_calibration: bool = True
+    min_language_samples: int = Field(default=1, ge=0)
+    min_language_macro_f1: float = Field(default=0.6, ge=0, le=1)
+    min_language_accepted_coverage: float = Field(default=0.5, ge=0, le=1)
+    min_oos_recall: float | None = Field(default=None, ge=0, le=1)
+    min_ground_truth_macro_f1: float | None = Field(default=None, ge=0, le=1)
+    max_known_false_positive_rate: float | None = Field(default=None, ge=0, le=1)
+    require_taxonomy_approval: bool = True
 
 
 class PipelineConfig(Policy):
@@ -146,6 +233,8 @@ class PipelineConfig(Policy):
     embedding: EmbeddingPolicy = Field(default_factory=EmbeddingPolicy)
     clustering: ClusteringPolicy = Field(default_factory=ClusteringPolicy)
     classification: ClassificationPolicy = Field(default_factory=ClassificationPolicy)
+    admission: AdmissionPolicy = Field(default_factory=AdmissionPolicy)
+    release: ReleasePolicy = Field(default_factory=ReleasePolicy)
     profiles: dict[str, DomainProfile] = Field(default_factory=dict)
 
     def profile(self, domain_id: str) -> DomainProfile:

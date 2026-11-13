@@ -35,7 +35,6 @@ class MetadataFeaturePipeline(LeakageSafePipelineStage[pd.DataFrame, np.ndarray]
     def _extract_numeric_and_dates(self, df: pd.DataFrame, is_fit: bool) -> np.ndarray:
         parts: list[np.ndarray] = []
 
-        # Text length, token count, and missing text indicators
         text_series = (
             df.get("raw_text", pd.Series([""] * len(df))).fillna("").astype(str)
         )
@@ -48,7 +47,6 @@ class MetadataFeaturePipeline(LeakageSafePipelineStage[pd.DataFrame, np.ndarray]
         )
         parts.extend([char_len, word_count, is_text_empty])
 
-        # Date parsing and missing indicator generation
         for col in self.date_cols:
             if col in df.columns:
                 ts = pd.to_datetime(df[col], errors="coerce", utc=True)
@@ -57,7 +55,6 @@ class MetadataFeaturePipeline(LeakageSafePipelineStage[pd.DataFrame, np.ndarray]
                 ts_num = ts_num.where(~ts.isna(), 0.0).to_numpy().reshape(-1, 1)
                 parts.extend([ts_num, is_missing])
 
-        # Numerical imputation with missing indicators
         for col in self.numeric_cols:
             if col in df.columns:
                 s = pd.to_numeric(df[col], errors="coerce")
