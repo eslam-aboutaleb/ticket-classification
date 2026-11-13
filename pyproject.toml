@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.26"]
 build-backend = "hatchling.build"
 
 [project]
@@ -52,6 +52,7 @@ ticket-worker = "ticket_classification.controllers.worker:main"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
+core-metadata-version = "2.4"
 packages = ["src/ticket_classification"]
 
 [tool.pytest.ini_options]
@@ -59,4 +60,5 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 
 [tool.hatch.build.targets.sdist]
+core-metadata-version = "2.4"
 include = ["/src", "/configs", "/scripts", "/docs", "/README.md", "/Dockerfile", "/compose.yaml", "/.dockerignore", "/.env.example", "/pyproject.toml", "/uv.lock"]
