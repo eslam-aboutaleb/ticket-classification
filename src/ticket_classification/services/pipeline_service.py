@@ -289,16 +289,17 @@ class TicketPipelineService:
         if not use_llm:
             return fallback_label, fallback_sig, fallback_queue
 
+        role = self.settings.system_role_description
+        domain = self.settings.domain_context
         system_prompt = (
-            "You are an expert Customer Support & Financial Claims Taxonomy Architect. "
-            "Given the top c-TF-IDF keywords and representative medoid tickets of a discovered cluster, "
-            "produce a concise category title, a 50-150 character signature summary, and the target routing queue."
+            f"You are an expert {role} in the domain of {domain}. "
+            "Given top distinctive keywords and representative text items of a discovered cluster, "
+            "produce a concise category title, a 50-150 character signature summary, and the target routing queue or responsible department."
         )
         user_prompt = (
             f"Cluster ID: {cluster_id}\n"
             f"Top Keywords: {', '.join(keywords)}\n"
-            f"Representative Medoid Tickets:\n"
-            + "\n".join(f"- {m[:200]}" for m in medoids[:3])
+            f"Representative Items:\n" + "\n".join(f"- {m[:200]}" for m in medoids[:3])
         )
         try:
             out = self.gateway.complete_structured(
@@ -831,14 +832,16 @@ class TicketPipelineService:
                     f"- cluster_id={cid}: {prof.short_label} | {prof.signature} (keywords: {', '.join(prof.top_keywords[:5])})"
                     for cid, prof in self.cluster_profiles.items()
                 )
+                role = self.settings.system_role_description
+                domain = self.settings.domain_context
                 rerank_out = self.gateway.complete_structured(
                     system_prompt=(
-                        "You are a precision Ticket & Claim Triage Classifier. "
+                        f"You are a precision {role} for {domain}. "
                         "Select the best matching cluster_id from the discovered cluster taxonomy, "
                         "or set is_novel_issue=true and chosen_cluster_id=-1 if it represents an unseen emerging issue."
                     ),
                     user_prompt=(
-                        f"Incoming Ticket: {rec.text_contextual}\n\n"
+                        f"Incoming Item: {rec.text_contextual}\n\n"
                         f"Discovered Clusters:\n{candidates_desc}"
                     ),
                     schema_cls=RerankDecisionLLMOutput,

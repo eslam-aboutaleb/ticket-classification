@@ -13,7 +13,7 @@ from ticket_classification.controllers.api import ServiceContainer
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="ticket-clf",
-        description="Cloud-Native Ticket & Claim Clustering and Classification CLI (powered by llm-gateway-sdk)",
+        description="Text Item Clustering and Classification CLI (powered by llm-gateway-sdk)",
     )
     parser.add_argument(
         "--dataset",
@@ -25,7 +25,12 @@ def main(argv: list[str] | None = None) -> int:
             "textoir_clinc_oos",
             "cfpb_claims",
         ],
-        help="Benchmark dataset to download and evaluate",
+        help="Benchmark dataset to download and evaluate across diverse industries",
+    )
+    parser.add_argument(
+        "--domain",
+        default=None,
+        help="Custom domain context (e.g. 'Healthcare Claims', 'Telecom Support', 'IT Incidents')",
     )
     parser.add_argument(
         "--provider",
@@ -65,6 +70,9 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     container = ServiceContainer()
+
+    if args.domain:
+        container.settings.domain_context = args.domain
 
     if args.provider:
         container.pipeline_service.switch_provider(args.provider)

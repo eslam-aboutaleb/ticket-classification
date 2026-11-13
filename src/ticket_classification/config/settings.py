@@ -72,6 +72,14 @@ class AppSettings(GatewayBaseSettings):
 
     config_path: str = Field(default="configs/pipeline_config.yaml")
     data_dir: str = Field(default="data")
+    domain_context: str = Field(
+        default="General Customer Support, Inquiries, Incidents, and Claims",
+        description="Domain or industry context injected into taxonomy generation prompts",
+    )
+    system_role_description: str = Field(
+        default="Domain Taxonomy and Triage Specialist",
+        description="Persona role used for automated taxonomy labeling and reranking",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

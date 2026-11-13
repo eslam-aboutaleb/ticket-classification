@@ -145,8 +145,9 @@ def classify_batch_endpoint(
 def create_app(container: ServiceContainer | None = None) -> FastAPI:
     """FastAPI application factory."""
     app = FastAPI(
-        title="Cloud-Native Ticket & Claim Clustering & Classification API",
+        title="Enterprise Text Item Clustering and Classification Service",
         version="0.1.0",
+        description="Generic, cloud-native semantic clustering, taxonomy generation, and classification engine.",
     )
     if container is not None:
         app.dependency_overrides[get_container] = lambda: container
