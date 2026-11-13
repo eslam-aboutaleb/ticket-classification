@@ -7,7 +7,6 @@
         "3.11",
         "3.12"
       ],
-      "pip-extras": "dev",
       "coverage-source": "src/ticket_classification",
       "coverage-min": 85,
       "build-distribution": false

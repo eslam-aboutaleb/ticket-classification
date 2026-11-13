@@ -5,9 +5,9 @@ A configurable pipeline for cleaning text, embedding it through `llm-gateway-sdk
 ## Install and configure
 
 ```sh
-uv pip install --python .venv/bin/python -e '.[dev]'
+uv sync --all-groups --frozen
 # Optional UMAP reducer:
-uv pip install --python .venv/bin/python -e '.[discovery]'
+uv sync --all-groups --extra discovery
 ```
 
 Configure the gateway using `.env.example`. Set the correct embedding dimensions for the deployment, or leave dimensions unset to learn and persist the returned width. Set `EMBEDDING_REVISION` to an immutable deployment/model revision. Provider, model, endpoint, dimensions, task and profile fingerprint identify the fitted representation; changing its identity requires refitting. Mutable gateway aliases must have their revision changed when repointed.

@@ -100,9 +100,7 @@ class ClusteringEngine(
             try:
                 from umap import UMAP
             except ImportError as exc:
-                raise ValueError(
-                    "UMAP requires pip install 'ticket-classification[discovery]'"
-                ) from exc
+                raise ValueError("UMAP requires uv sync --extra discovery") from exc
             if len(data) < 4:
                 projected = normed
             else:
