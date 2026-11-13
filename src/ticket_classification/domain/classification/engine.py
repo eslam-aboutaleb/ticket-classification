@@ -39,7 +39,18 @@ class ClassifierSuite:
         confidences: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Filter low-confidence boundary points and gate rare classes (karolzak + DeepAligned pattern)."""
-        conf_floor = float(np.quantile(confidences, self.confidence_quantile_cutoff))
+        if not len(confidences):
+            self.valid_classes_ = set()
+            return X[:0], cluster_ids[:0]
+        conf_floor = (
+            float(
+                np.quantile(
+                    confidences[cluster_ids >= 0], self.confidence_quantile_cutoff
+                )
+            )
+            if np.any(cluster_ids >= 0)
+            else 1.0
+        )
         mask = confidences >= conf_floor
 
         # Enforce min_data_per_class support gating
@@ -49,11 +60,7 @@ class ClassifierSuite:
             for c, cnt in zip(unique, counts)
             if cnt >= self.min_data_per_class and c >= 0
         }
-        if len(valid_classes) < 2:
-            valid_classes = {int(c) for c in np.unique(cluster_ids) if c >= 0}
-            mask = cluster_ids >= 0
-        else:
-            mask = mask & np.isin(cluster_ids, list(valid_classes))
+        mask = mask & np.isin(cluster_ids, list(valid_classes))
 
         self.valid_classes_ = valid_classes
         return X[mask], cluster_ids[mask]
@@ -69,6 +76,11 @@ class ClassifierSuite:
         X_clean, y_clean = self.filter_pseudo_labels(
             X_train, cluster_ids_train, confidences_train
         )
+        self.models_ = {}
+        if not len(y_clean):
+            self.centroids_ = np.empty((0, embeddings_train.shape[1]))
+            self.best_model_name_ = "unassigned"
+            return self.models_
 
         # Compute cluster centroids in normalized embedding space for Open-Set distance gate
         norm_emb = normalize(embeddings_train, norm="l2")
@@ -92,6 +104,10 @@ class ClassifierSuite:
         # Majority class baseline
         dummy = DummyClassifier(strategy="most_frequent")
         dummy.fit(X_clean, y_clean)
+        if len(unique_classes) == 1:
+            self.models_ = {"single_cluster": dummy}
+            self.best_model_name_ = "single_cluster"
+            return self.models_
 
         # Multinomial logistic regression with balanced class weights
         logreg = LogisticRegression(
@@ -139,6 +155,15 @@ class ClassifierSuite:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Return (pred_cluster_ids, confidences, margins, is_open_set_novel, centroid_distances)."""
         target_name = model_name or self.best_model_name_
+        if not self.models_:
+            n = len(X)
+            return (
+                np.full(n, -1),
+                np.zeros(n),
+                np.zeros(n),
+                np.ones(n, dtype=bool),
+                np.ones(n),
+            )
         clf = self.models_[target_name]
 
         probs = clf.predict_proba(X)
@@ -157,6 +182,14 @@ class ClassifierSuite:
         norm_emb = normalize(embeddings, norm="l2")
         cos_sims = norm_emb @ self.centroids_.T
         centroid_dists = 1.0 - np.max(cos_sims, axis=1)
-        is_open_set = centroid_dists > (self.distance_threshold_ * 1.15)
+        is_open_set = centroid_dists > self.distance_threshold_
 
         return preds, confidences, margins, is_open_set, centroid_dists
+
+    def calibrate_novelty(self, embeddings: np.ndarray) -> None:
+        """Fit the serving gate on held-out known examples in original embedding space."""
+        if self.centroids_ is not None and len(self.centroids_) and len(embeddings):
+            distances = 1.0 - np.max(normalize(embeddings) @ self.centroids_.T, axis=1)
+            self.distance_threshold_ = float(
+                np.quantile(distances, self.open_set_distance_quantile)
+            )

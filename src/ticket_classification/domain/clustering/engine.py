@@ -48,23 +48,53 @@ class ClusteringEngine(
         self.last_alignment_: AlignmentResult | None = None
 
     def _project_embeddings(self, embeddings: np.ndarray, is_fit: bool) -> np.ndarray:
+        embeddings = np.asarray(embeddings, dtype=float)
+        if embeddings.ndim != 2 or not np.isfinite(embeddings).all():
+            raise ValueError("Embeddings must be a finite two-dimensional matrix")
+        if not len(embeddings):
+            width = (
+                self._projector.n_components_
+                if self._projector is not None
+                else embeddings.shape[1]
+            )
+            return np.empty((0, width))
         normed = normalize(embeddings, norm="l2")
+        if not is_fit:
+            return (
+                normalize(self._projector.transform(normed), norm="l2")
+                if self._projector is not None
+                else normed
+            )
+        self._projector = None
         n_comp = min(self.n_components, normed.shape[0] - 1, normed.shape[1])
         if n_comp < 2:
             return normed
-        if is_fit:
-            self._projector = PCA(n_components=n_comp, random_state=self.random_state)
-            return normalize(self._projector.fit_transform(normed), norm="l2")
-        assert self._projector is not None
-        return normalize(self._projector.transform(normed), norm="l2")
+        self._projector = PCA(n_components=n_comp, random_state=self.random_state)
+        return normalize(self._projector.fit_transform(normed), norm="l2")
+
+    def fit_transform(self, train_data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return discovery assignments, preserving fitted noise and recovery decisions."""
+        self.fit(train_data)
+        assert self.train_labels_ is not None
+        _, strengths = self.transform(train_data)
+        return self.train_labels_.copy(), np.where(
+            self.train_labels_ >= 0, strengths, 0.0
+        )
 
     def predict_k_with_dropout_and_silhouette(
         self, projected: np.ndarray
     ) -> tuple[int, float]:
         """Estimates cluster count by combining density-filtered upper-bound clustering with silhouette validation."""
         n_samples = projected.shape[0]
-        max_k = min(self.k_max, max(self.k_min, n_samples // 4))
-        min_k = min(self.k_min, max(2, max_k))
+        if n_samples < 4 or len(np.unique(projected, axis=0)) < 2:
+            return 1, 0.0
+        max_k = min(
+            self.k_max,
+            max(self.k_min, n_samples // 4),
+            n_samples - 1,
+            len(np.unique(projected, axis=0)),
+        )
+        min_k = min(self.k_min, max_k)
 
         km_upper = KMeans(
             n_clusters=max_k, n_init=10, random_state=self.random_state
@@ -168,6 +198,8 @@ class ClusteringEngine(
         return recovered, reassigned_count, remaining_outliers
 
     def _fit_impl(self, train_data: np.ndarray) -> None:
+        if len(train_data) == 0:
+            raise ValueError("Discovery requires at least one embedding")
         projected = self._project_embeddings(train_data, is_fit=True)
 
         if self.strategy == "density":
@@ -267,6 +299,8 @@ class ClusteringEngine(
         """Return (cluster_ids, cosine_confidences) for any dataset split."""
         assert self.centroids_ is not None
         projected = self._project_embeddings(data, is_fit=False)
+        if len(projected) == 0:
+            return np.empty(0, dtype=int), np.empty(0)
         norm_cents = normalize(self.centroids_, norm="l2")
         sims = projected @ norm_cents.T
         cluster_ids = np.argmax(sims, axis=1).astype(int)
