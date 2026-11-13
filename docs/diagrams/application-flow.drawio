@@ -1,0 +1,124 @@
+<mxfile host="app.diagrams.net">
+  <diagram id="application-flow" name="Application flow">
+    <mxGraphModel adaptiveColors="auto" page="1" pageWidth="1040" pageHeight="960" grid="1" gridSize="10">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="How the ticket classification app works" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Helvetica;fontSize=26;fontColor=#233247;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="30" y="15" width="970" height="40" />
+        </mxCell>
+        <mxCell id="subtitle" value="Learn categories from past tickets. Use them to understand and route new tickets." style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="30" y="58" width="960" height="30" />
+        </mxCell>
+        <mxCell id="learn" value="1  LEARN FROM PAST TICKETS  ·  Run a fit through the CLI or API" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Helvetica;fontSize=18;fontColor=#233247;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="30" y="105" width="960" height="30" />
+        </mxCell>
+        <mxCell id="history" value="&lt;b&gt;Past tickets&lt;/b&gt;&lt;br&gt;&lt;small&gt;Your data or a benchmark&lt;br&gt;Labels are optional&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#EAF6ED;strokeColor=#79AC87;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="30" y="155" width="160" height="90" />
+        </mxCell>
+        <mxCell id="prepare" value="&lt;b&gt;Prepare the data&lt;/b&gt;&lt;br&gt;&lt;small&gt;Validate, split safely,&lt;br&gt;clean and mask text&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#EEF4FF;strokeColor=#7EA6E0;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="230" y="155" width="160" height="90" />
+        </mxCell>
+        <mxCell id="vectors" value="&lt;b&gt;Understand text&lt;/b&gt;&lt;br&gt;&lt;small&gt;Multilingual vectors&lt;br&gt;Gateway + cache&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#EEF4FF;strokeColor=#7EA6E0;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="430" y="155" width="160" height="90" />
+        </mxCell>
+        <mxCell id="discover" value="&lt;b&gt;Group similar issues&lt;/b&gt;&lt;br&gt;&lt;small&gt;Discover groups of tickets&lt;br&gt;HDBSCAN or K-Means&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#EEF4FF;strokeColor=#7EA6E0;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="630" y="155" width="160" height="90" />
+        </mxCell>
+        <mxCell id="names" value="&lt;b&gt;Name categories&lt;/b&gt;&lt;br&gt;&lt;small&gt;Keywords + examples&lt;br&gt;Optional AI naming&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#EEF4FF;strokeColor=#7EA6E0;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="830" y="155" width="160" height="90" />
+        </mxCell>
+        <mxCell id="train" value="&lt;b&gt;Train classifier&lt;/b&gt;&lt;br&gt;&lt;small&gt;Learn to predict categories&lt;br&gt;Evaluate when data allows&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#EEF4FF;strokeColor=#7EA6E0;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="830" y="275" width="160" height="90" />
+        </mxCell>
+        <mxCell id="saved" value="&lt;b&gt;Save a model version&lt;/b&gt;&lt;br&gt;&lt;small&gt;Categories, classifier,&lt;br&gt;rules and fitted features&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#F1EBFA;strokeColor=#A58AC7;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="580" y="275" width="210" height="90" />
+        </mxCell>
+        <mxCell id="fitnote" value="Each domain has its own categories and routing rules.&lt;br&gt;New categories require another fit; review items are not learned automatically." style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="30" y="265" width="480" height="90" />
+        </mxCell>
+        <mxCell id="e0" source="history" target="prepare" value="" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e1" source="prepare" target="vectors" value="" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e2" source="vectors" target="discover" value="" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e3" source="discover" target="names" value="" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e4" source="names" target="train" value="" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e5" source="train" target="saved" value="" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="serve" value="2  HANDLE A NEW TICKET  ·  Single or batch classification API" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Helvetica;fontSize=18;fontColor=#233247;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="30" y="385" width="960" height="30" />
+        </mxCell>
+        <mxCell id="incoming" value="&lt;b&gt;New ticket&lt;/b&gt;&lt;br&gt;&lt;small&gt;Text + optional metadata&lt;br&gt;English, Arabic, etc.&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#EAF6ED;strokeColor=#79AC87;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="30" y="450" width="160" height="90" />
+        </mxCell>
+        <mxCell id="clean" value="&lt;b&gt;Prepare the ticket&lt;/b&gt;&lt;br&gt;&lt;small&gt;Clean and mask text&lt;br&gt;Check language coverage&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#EEF4FF;strokeColor=#7EA6E0;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="230" y="450" width="160" height="90" />
+        </mxCell>
+        <mxCell id="features" value="&lt;b&gt;Build its features&lt;/b&gt;&lt;br&gt;&lt;small&gt;Meaning + words&lt;br&gt;+ configured metadata&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#EEF4FF;strokeColor=#7EA6E0;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="430" y="450" width="160" height="90" />
+        </mxCell>
+        <mxCell id="predict" value="&lt;b&gt;Classify ticket&lt;/b&gt;&lt;br&gt;&lt;small&gt;Use saved model + check&lt;br&gt;distance from known issues&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#EEF4FF;strokeColor=#7EA6E0;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="630" y="450" width="160" height="90" />
+        </mxCell>
+        <mxCell id="result" value="&lt;b&gt;Choose outcome&lt;/b&gt;&lt;br&gt;&lt;small&gt;Optional AI second opinion&lt;br&gt;for ambiguous / novel input&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#FFF5D6;strokeColor=#CFAB50;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="830" y="450" width="160" height="90" />
+        </mxCell>
+        <mxCell id="e6" source="incoming" target="clean" value="" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e7" source="clean" target="features" value="" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e8" source="features" target="predict" value="" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e9" source="predict" target="result" value="" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e10" source="saved" target="predict" value="load / reuse" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="known" value="&lt;b&gt;KNOWN&lt;/b&gt;&lt;br&gt;&lt;small&gt;Supported, clear match&lt;br&gt;Return approved team route&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#EAF6ED;strokeColor=#79AC87;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="250" y="620" width="220" height="85" />
+        </mxCell>
+        <mxCell id="review" value="&lt;b&gt;NEEDS REVIEW&lt;/b&gt;&lt;br&gt;&lt;small&gt;Empty, unsupported / uncertain&lt;br&gt;language, no model classes,&lt;br&gt;or an ambiguous match&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#FFF0E4;strokeColor=#D39A6A;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="510" y="620" width="230" height="85" />
+        </mxCell>
+        <mxCell id="unknown" value="&lt;b&gt;UNKNOWN&lt;/b&gt;&lt;br&gt;&lt;small&gt;New or unfamiliar issue&lt;br&gt;No category or route ID&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#FFF0E4;strokeColor=#D39A6A;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="780" y="620" width="220" height="85" />
+        </mxCell>
+        <mxCell id="e11" source="result" target="known" value="clear match" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;exitX=0;exitY=1;entryX=0.5;entryY=0;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e12" source="result" target="review" value="uncertain" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e13" source="result" target="unknown" value="novel issue" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;exitX=1;exitY=1;entryX=0.5;entryY=0;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="queue" value="&lt;b&gt;Persist for human review&lt;/b&gt;&lt;br&gt;&lt;small&gt;Masked ticket + reason + model version&lt;br&gt;View via GET /review-items&lt;/small&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;fontColor=#233247;fillColor=#F1EBFA;strokeColor=#A58AC7;strokeWidth=1.5;spacing=8;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="645" y="770" width="290" height="70" />
+        </mxCell>
+        <mxCell id="e14" source="review" target="queue" value="" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e15" source="unknown" target="queue" value="" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#FFFFFF;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="notes" value="Results include status, confidence and model version. AI cannot override the distance-based unknown check.&lt;br&gt;Invalid requests, a missing fit, stale versions or changed embedding identity return an error.&lt;br&gt;Blue = processing   ·   Purple = saved data   ·   Green = input / matched result   ·   Amber = decision / review" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Helvetica;fontSize=15;fontColor=#233247;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="30" y="865" width="970" height="80" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
