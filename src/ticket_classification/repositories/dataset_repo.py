@@ -42,12 +42,45 @@ class TicketDatasetRepository:
         },
     }
 
-    def __init__(self, data_dir: str | Path = "data") -> None:
+    def __init__(
+        self, data_dir: str | Path = "data", specs: dict | None = None
+    ) -> None:
         self.data_dir = Path(data_dir)
         self.raw_dir = self.data_dir / "raw"
         self.interim_dir = self.data_dir / "interim"
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.interim_dir.mkdir(parents=True, exist_ok=True)
+        self.benchmark_urls = {k: dict(v) for k, v in self.BENCHMARK_URLS.items()}
+        for name, spec in (specs or {}).items():
+            self.benchmark_urls[name] = {
+                **self.benchmark_urls.get(name, {}),
+                **{k.removesuffix("_url"): v for k, v in spec.items()},
+            }
+
+    @staticmethod
+    def adapt_frame(data: pd.DataFrame, profile) -> pd.DataFrame:
+        """Map arbitrary tabular records without requiring ground-truth labels."""
+        frame = data.copy()
+        if profile.text_col not in frame:
+            raise ValueError(f"Missing configured text column: {profile.text_col}")
+        rename = {profile.text_col: "raw_text", profile.id_col: "ticket_id"}
+        if profile.label_col and profile.label_col in frame:
+            rename[profile.label_col] = "label"
+        if profile.language_hint_col and profile.language_hint_col in frame:
+            rename[profile.language_hint_col] = "language_hint"
+        frame = frame.rename(columns=rename)
+        if "ticket_id" not in frame:
+            frame["ticket_id"] = [f"item-{i}" for i in range(len(frame))]
+        if frame["ticket_id"].isna().any() or frame["ticket_id"].duplicated().any():
+            raise ValueError("Input item IDs must be non-null and unique")
+        if "metadata" in frame:
+            nested = pd.json_normalize(
+                [x if isinstance(x, dict) else {} for x in frame.pop("metadata")]
+            )
+            for col in nested:
+                if col not in frame:
+                    frame[col] = nested[col].to_numpy()
+        return frame.reset_index(drop=True)
 
     def _download_text(self, url: str, dest: Path) -> str:
         if dest.exists():
@@ -66,12 +99,12 @@ class TicketDatasetRepository:
         random_state: int = 42,
     ) -> pd.DataFrame:
         """Download (if needed) and return a unified DataFrame with [ticket_id, raw_text, label, split, metadata]."""
-        if dataset_name not in self.BENCHMARK_URLS:
+        if dataset_name not in self.benchmark_urls:
             raise ValueError(
                 f"Unknown dataset '{dataset_name}'. Available: {list(self.BENCHMARK_URLS)}"
             )
 
-        spec = self.BENCHMARK_URLS[dataset_name]
+        spec = self.benchmark_urls[dataset_name]
         fmt = spec["format"]
 
         if fmt == "tsv":
@@ -82,7 +115,10 @@ class TicketDatasetRepository:
                 raw_tsv = self._download_text(url, local_file)
                 df_split = pd.read_csv(io.StringIO(raw_tsv), sep="\t")
                 df_split = df_split.rename(
-                    columns={"text": "raw_text", "label": "label"}
+                    columns={
+                        spec.get("text_col", "text"): "raw_text",
+                        spec.get("label_col", "label"): "label",
+                    }
                 )
                 df_split["split"] = split_name
                 frames.append(df_split)
@@ -92,7 +128,12 @@ class TicketDatasetRepository:
             local_file = self.raw_dir / f"{dataset_name}.csv"
             raw_csv = self._download_text(spec["train"], local_file)
             df = pd.read_csv(io.StringIO(raw_csv))
-            df = df.rename(columns={"Document": "raw_text", "Topic_group": "label"})
+            df = df.rename(
+                columns={
+                    spec.get("text_col", "Document"): "raw_text",
+                    spec.get("label_col", "Topic_group"): "label",
+                }
+            )
             df["split"] = "unassigned"
 
         elif fmt == "airweave_py":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +97,13 @@ class ReportAndPlotView:
         emb = metrics["embedding_stats"]
         audit = metrics["audit_and_split"]
 
+        if not metrics.get("evaluated", True):
+            text = f"# Fit Report: `{metrics['dataset']}`\n\nEvaluation requires supported classes and nonempty validation/test splits.\n\n```json\n{json.dumps(metrics, ensure_ascii=False, indent=2)}\n```\n"
+            path = Path(report_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            return text
+
         lines = [
             f"# Benchmark Execution Report: `{metrics['dataset']}`",
             "",
@@ -112,13 +120,14 @@ class ReportAndPlotView:
             f"- **Split Distribution (Strict Fit-on-Train-Only):** `{audit['split_counts']}`",
             f"- **Ground-Truth Categories Present:** `{audit['unique_ground_truth_labels']}`",
             "",
-            "## 2. Stage-1/2 Deduplication & SQLite SHA-256 Embedding Cache",
+            "## 2. Exact Deduplication & SQLite SHA-256 Embedding Cache",
             f"- **Input Tickets:** `{emb['total_texts']}` $\\rightarrow$ **Unique Contextual Texts (Stage-1 Exact):** `{emb['unique_texts_after_stage1_dedup']}`",
-            f"- **Unique Structural Templates (Stage-2 Funnel):** `{emb.get('unique_templates_after_stage2_funnel', 'N/A')}`",
+            f"- **Unique Structural Templates (diagnostic only):** `{emb.get('unique_templates_after_stage2_funnel', 'N/A')}`",
             f"- **SQLite Cache Hits:** `{emb['cache_hits']}` | **New Cloud Gateway Embeddings:** `{emb['gateway_embedded_texts']}` (`{emb['gateway_batch_requests']}` batch calls)",
             "",
-            "## 3. Unsupervised Clustering, Silhouette Sweep & Hungarian Alignment",
-            f"- **Optimal Cluster Count ($K$):** `{clu['optimal_k']}` (DeepAligned dropout viable $K$ = `{clu.get('dropout_viable_k', 'N/A')}`, boundary limit reached = `{clu.get('hit_k_max_boundary', False)}`)",
+            "## 3. Discovery and Dataset-Driven Cluster Selection",
+            f"- **Selected Cluster Count ($K$):** `{clu['optimal_k']}` (boundary limit reached = `{clu.get('hit_k_max_boundary', False)}`)",
+            f"- **Selection Diagnostics:** `{clu.get('diagnostics', {})}`",
             f"- **Best Cosine Silhouette Score:** `{clu['best_silhouette_cosine']}`",
             f"- **Silhouette Score by Candidate $K$:** `{clu['silhouette_sweep']}`",
             f"- **External Validity vs Ground-Truth Labels:** `{clu['external_validity']}`",

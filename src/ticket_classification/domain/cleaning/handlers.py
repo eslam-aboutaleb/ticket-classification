@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import html
 import re
+import unicodedata
 from abc import ABC, abstractmethod
+from itertools import pairwise
 from typing import ClassVar
 
+from ticket_classification.config.pipeline import CleaningPolicy, LanguagePolicy
+from ticket_classification.domain.cleaning.languages import (
+    detect_language,
+    lexical_tokens,
+)
 from ticket_classification.models.entities import TicketRecord
 
 STOP_WORDS: set[str] = {
@@ -151,13 +159,26 @@ class EmailHeaderAndFooterHandler(TextCleaningHandler):
             r"the information in this email is confidential.*?(?:recipient\.|$)",
             re.IGNORECASE | re.DOTALL,
         ),
-        re.compile(r"<[^>]+>"),  # HTML tags
+        re.compile(
+            r"</?(?:html|body|head|div|span|p|br|a|b|i|strong|em|table|tr|td|img|ul|ol|li)(?:\s[^>]*)?/?>",
+            re.IGNORECASE,
+        ),
     ]
 
+    def __init__(self, policy: CleaningPolicy | None = None) -> None:
+        super().__init__()
+        self.policy = policy or CleaningPolicy()
+
     def _process(self, record: TicketRecord) -> TicketRecord:
-        text = record.text_contextual or record.raw_text or ""
-        for pat in self.HEADER_PATTERNS:
-            text = pat.sub(" ", text)
+        text = record.text_contextual
+        for index, pattern in enumerate(self.HEADER_PATTERNS):
+            if index < 3 and not self.policy.strip_email_headers:
+                continue
+            if index == 3 and not self.policy.strip_disclaimers:
+                continue
+            text = pattern.sub(" ", text)
+        for pattern in self.policy.boilerplate_patterns:
+            text = re.sub(pattern, " ", text)
         record.text_contextual = re.sub(r"\s+", " ", text).strip()
         return record
 
@@ -175,13 +196,21 @@ class TypedPIIMaskHandler(TextCleaningHandler):
         r"\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b"
     )
 
+    def __init__(self, policy: CleaningPolicy | None = None) -> None:
+        super().__init__()
+        self.policy = policy or CleaningPolicy()
+
     def _process(self, record: TicketRecord) -> TicketRecord:
-        text = record.text_contextual or record.raw_text or ""
+        text = record.text_contextual
+        if not self.policy.mask_pii:
+            return record
         text = self.RE_URL.sub("<URL>", text)
         text = self.RE_EMAIL.sub("<EMAIL>", text)
         text = self.RE_TICKET_ID.sub("<TICKET_ID>", text)
         text = self.RE_AMOUNT.sub("<AMOUNT>", text)
         text = self.RE_PHONE.sub("<PHONE>", text)
+        for token, pattern in self.policy.pii_patterns.items():
+            text = re.sub(pattern, f"<{token.upper()}>", text)
         record.text_contextual = re.sub(r"\s+", " ", text).strip()
         return record
 
@@ -195,7 +224,7 @@ class RedactionMaskNormalizerHandler(TextCleaningHandler):
     )
 
     def _process(self, record: TicketRecord) -> TicketRecord:
-        text = record.text_contextual or record.raw_text or ""
+        text = record.text_contextual
         text = self.RE_XXXX.sub("<REDACTED>", text)
         text = self.RE_BRACKET_REDACT.sub("<REDACTED>", text)
         record.text_contextual = re.sub(r"\s+", " ", text).strip()
@@ -208,105 +237,83 @@ class TemplateSignatureHandler(TextCleaningHandler):
     RE_NUMBERS = re.compile(r"\b\d+\b")
     RE_QUOTED = re.compile(r'"[^"]+"|\'[^\']+\'')
 
+    def __init__(self, mask_numbers: bool = False) -> None:
+        super().__init__()
+        self.mask_numbers = mask_numbers
+
     def _process(self, record: TicketRecord) -> TicketRecord:
-        text = (record.text_contextual or record.raw_text or "").lower()
-        sig = self.RE_QUOTED.sub("<STR>", text)
-        sig = self.RE_NUMBERS.sub("<NUM>", sig)
-        sig = re.sub(r"[^a-z0-9_<>]+", " ", sig)
-        record.template_signature = re.sub(r"\s+", " ", sig).strip()[:180]
+        text = record.text_contextual.casefold()
+        if self.mask_numbers:
+            text = self.RE_NUMBERS.sub("<NUM>", text)
+        record.template_signature = re.sub(r"\s+", " ", text).strip()
         return record
 
 
 class DualTrackBuilderHandler(TextCleaningHandler):
     """Produces contextual text for dense embeddings and normalized tokens for term frequency analysis."""
 
-    RE_WORDS = re.compile(r"\b[a-z]{2,}\b")
-
-    def __init__(self, min_token_len: int = 2) -> None:
+    def __init__(
+        self, min_token_len: int = 2, language_policy: LanguagePolicy | None = None
+    ) -> None:
         super().__init__()
         self.min_token_len = min_token_len
-
-    SILENT_E_ENDINGS: ClassVar[tuple[str, ...]] = (
-        "rg",
-        "chang",
-        "iv",
-        "lv",
-        "rv",
-        "vv",
-        "dat",
-        "put",
-        "lut",
-        "mut",
-        "rut",
-        "anc",
-        "enc",
-        "inc",
-        "orc",
-        "urc",
-        "ic",
-        "as",
-        "is",
-        "os",
-        "us",
-        "iz",
-        "az",
-        "oz",
-        "uz",
-        "lin",
-        "pir",
-        "uir",
-        "tir",
-        "vir",
-        "tur",
-        "cur",
-        "sur",
-    )
-
-    @classmethod
-    def _restore_stem(cls, stem: str) -> str:
-        if len(stem) >= 3 and stem[-1] == stem[-2] and stem[-1] in "bdgmnprt":
-            return stem[:-1]
-        if stem.endswith(cls.SILENT_E_ENDINGS) and stem not in {"put", "cut", "out"}:
-            return stem + "e"
-        return stem
-
-    @classmethod
-    def _light_lemmatize(cls, word: str) -> str:
-        if len(word) > 4:
-            if word.endswith(("ies", "ied")):
-                return word[:-3] + "y"
-            if word.endswith("ing") and len(word) > 5:
-                return cls._restore_stem(word[:-3])
-            if word.endswith("ed") and len(word) > 4:
-                return cls._restore_stem(word[:-2])
-            if word.endswith("es") and word[:-2].endswith(("sh", "ch", "ss", "x", "z")):
-                return word[:-2]
-            if word.endswith("s") and not word.endswith(("ss", "us", "is")):
-                return word[:-1]
-        return word
+        self.language_policy = language_policy or LanguagePolicy()
 
     def _process(self, record: TicketRecord) -> TicketRecord:
-        contextual = record.text_contextual or record.raw_text or ""
-        if not contextual.strip():
-            contextual = "empty_ticket"
+        contextual = record.text_contextual
         record.text_contextual = contextual
 
-        lowered = re.sub(r"<[A-Z_]+>", " ", contextual).lower()
-        tokens = [
-            self._light_lemmatize(w)
-            for w in self.RE_WORDS.findall(lowered)
-            if len(w) >= self.min_token_len and w not in STOP_WORDS
-        ]
+        detected = detect_language(
+            re.sub(r"<[A-Z_]+>", " ", contextual),
+            self.language_policy,
+            record.language_hint,
+        )
+        record.languages = detected.languages
+        record.language_confidence = detected.confidence
+        record.language_status = detected.status
+
+        tokens = lexical_tokens(
+            contextual,
+            self.language_policy,
+            STOP_WORDS,
+            self.min_token_len,
+            record.languages,
+        )
         record.text_lexical = " ".join(tokens) if tokens else "empty"
         return record
 
 
-def build_default_cleaning_chain() -> TextCleaningHandler:
-    """Builds the default sequential handler pipeline for ticket and claim normalization."""
-    h1 = EmailHeaderAndFooterHandler()
-    h2 = TypedPIIMaskHandler()
-    h3 = RedactionMaskNormalizerHandler()
-    h4 = TemplateSignatureHandler()
-    h5 = DualTrackBuilderHandler()
-    h1.set_next(h2).set_next(h3).set_next(h4).set_next(h5)
-    return h1
+class UnicodeLanguageHandler(TextCleaningHandler):
+    def __init__(self, policy: LanguagePolicy) -> None:
+        super().__init__()
+        self.policy = policy
+
+    def _process(self, record: TicketRecord) -> TicketRecord:
+        record.text_contextual = unicodedata.normalize(
+            self.policy.normalization, html.unescape(record.raw_text)
+        )
+        return record
+
+
+def build_default_cleaning_chain(
+    cleaning: CleaningPolicy | None = None, language: LanguagePolicy | None = None
+) -> TextCleaningHandler:
+    """Compose domain cleaning with a separately configured language policy."""
+    cleaning = cleaning or CleaningPolicy()
+    language = language or LanguagePolicy()
+    handlers = [
+        UnicodeLanguageHandler(language),
+        EmailHeaderAndFooterHandler(cleaning),
+        TypedPIIMaskHandler(cleaning),
+    ]
+    if cleaning.normalize_redactions:
+        handlers.append(RedactionMaskNormalizerHandler())
+    handlers.extend(
+        [
+            TemplateSignatureHandler(cleaning.template_mask_numbers),
+            DualTrackBuilderHandler(cleaning.min_token_length, language),
+        ]
+    )
+    for current, following in pairwise(handlers):
+        current.set_next(following)
+    return handlers[0]

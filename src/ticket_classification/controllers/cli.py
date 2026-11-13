@@ -1,129 +1,98 @@
-"""CLI Controller for running benchmark datasets, switching providers, and classifying tickets."""
+"""Batch fitting for benchmark datasets or user-supplied multilingual data."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-from dataclasses import asdict
+from pathlib import Path
 
+import pandas as pd
+
+from ticket_classification.config.settings import AppSettings
 from ticket_classification.controllers.api import ServiceContainer
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="ticket-clf",
-        description="Text Item Clustering and Classification CLI (powered by llm-gateway-sdk)",
-    )
+    parser = argparse.ArgumentParser(prog="ticket-clf", description=__doc__)
+    parser.add_argument("--dataset", default="textoir_banking77")
     parser.add_argument(
-        "--dataset",
-        default="textoir_banking77",
-        choices=[
-            "textoir_banking77",
-            "airweave_incidents",
-            "it_service_tickets",
-            "textoir_clinc_oos",
-            "cfpb_claims",
-        ],
-        help="Benchmark dataset to download and evaluate across diverse industries",
+        "--input",
+        type=Path,
+        help="CSV, JSON records or JSONL input; columns come from the domain profile",
     )
+    parser.add_argument("--config", default="configs/pipeline_config.yaml")
     parser.add_argument(
-        "--domain",
-        default=None,
-        help="Custom domain context (e.g. 'Healthcare Claims', 'Telecom Support', 'IT Incidents')",
+        "--domain-id",
+        default="generic",
+        help="Built-in or configured domain profile ID",
     )
+    parser.add_argument("--domain", help="Optional context override for naming")
+    parser.add_argument("--provider", choices=["litellm", "openai", "gemini"])
     parser.add_argument(
-        "--provider",
-        default=None,
-        choices=["litellm", "openai", "gemini"],
-        help="Cloud model provider routed through llm-gateway-sdk",
+        "--strategy", choices=["aligned_kmeans", "hdbscan_density", "density"]
     )
-    parser.add_argument(
-        "--max-samples",
-        type=int,
-        default=300,
-        help="Maximum stratified samples to run for the benchmark",
-    )
+    parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument(
         "--top-n-classes",
         type=int,
-        default=8,
-        help="Number of ground-truth categories to sample",
+        default=None,
+        help="Optional labeled benchmark subset; omitted by default",
     )
+    parser.add_argument("--k-min", type=int, default=None)
+    parser.add_argument("--k-max", type=int, default=None)
+    parser.add_argument("--no-llm-naming", action="store_true")
     parser.add_argument(
-        "--k-min",
-        type=int,
-        default=5,
-        help="Minimum candidate clusters K for Silhouette sweep",
+        "--oos-file",
+        type=Path,
+        help="JSON array of domain-appropriate unknown-intent probe texts",
     )
-    parser.add_argument(
-        "--k-max",
-        type=int,
-        default=12,
-        help="Maximum candidate clusters K for Silhouette sweep",
-    )
-    parser.add_argument(
-        "--report-path",
-        default="BENCHMARK_REPORT.md",
-        help="Output path for the Markdown benchmark report",
-    )
-
+    parser.add_argument("--report-path", default="BENCHMARK_REPORT.md")
     args = parser.parse_args(argv)
-    container = ServiceContainer()
-
+    options = {"config_path": args.config, "domain_id": args.domain_id}
     if args.domain:
-        container.settings.domain_context = args.domain
-
+        options["domain_context"] = args.domain
+    container = ServiceContainer(settings=AppSettings(**options))
+    service = container.pipeline_service
     if args.provider:
-        container.pipeline_service.switch_provider(args.provider)
-
-    print(
-        f"==> Running benchmark on dataset='{args.dataset}' "
-        f"(provider='{container.gateway.get_active_provider().value}', max_samples={args.max_samples})..."
-    )
-    metrics = container.pipeline_service.run_benchmark_pipeline(
-        dataset_name=args.dataset,
-        max_samples=args.max_samples,
-        top_n_classes=args.top_n_classes,
-        k_min=args.k_min,
-        k_max=args.k_max,
-        use_llm_naming=True,
-        provider_override=args.provider,
-    )
-    plot_paths = container.report_view.save_plots(metrics)
-    container.report_view.render_markdown_report(
-        metrics, plot_paths=plot_paths, report_path=args.report_path
-    )
-
-    # Also test live inference on a sample in-distribution ticket and an open-set novel claim
-    sample_in = container.pipeline_service.classify_single_ticket(
-        ticket_id="live-test-001",
-        raw_text="From: user@example.com\nSubject: Pending card top-up\nHi, I made a cash deposit and top-up to my card account $250.00 yesterday (INC99812) but my balance is still not updated!",
-        provider_override=args.provider,
-    )
-    sample_novel = container.pipeline_service.classify_single_ticket(
-        ticket_id="live-test-002",
-        raw_text="The office espresso machine on the 4th floor is leaking steam and needs a replacement gasket.",
-        provider_override=args.provider,
-    )
-
-    summary = {
-        "dataset": metrics["dataset"],
-        "provider_used": metrics["provider_used"],
-        "embedding_model": metrics["embedding_model"],
-        "chat_model": metrics["chat_model"],
-        "optimal_k": metrics["clustering"]["optimal_k"],
-        "best_silhouette": metrics["clustering"]["best_silhouette_cosine"],
-        "external_validity": metrics["clustering"]["external_validity"],
-        "selected_classifier": metrics["classification"]["selected_production_model"],
-        "classifier_metrics": metrics["classification"]["model_comparison"][
-            metrics["classification"]["selected_production_model"]
-        ],
-        "sample_predictions": [asdict(sample_in), asdict(sample_novel)],
-        "report_saved_to": args.report_path,
-        "plots": plot_paths,
+        service.switch_provider(args.provider)
+    kwargs = {
+        "k_min": args.k_min,
+        "k_max": args.k_max,
+        "strategy": args.strategy,
+        "use_llm_naming": not args.no_llm_naming,
+        "provider_override": args.provider,
     }
-    print(json.dumps(summary, indent=2))
+    if args.oos_file:
+        kwargs["oos_texts"] = json.loads(args.oos_file.read_text(encoding="utf-8"))
+    if args.input:
+        if args.input.suffix.lower() == ".csv":
+            frame = pd.read_csv(args.input)
+        else:
+            frame = pd.read_json(
+                args.input, lines=args.input.suffix.lower() == ".jsonl"
+            )
+        metrics = service.fit_dataframe(frame, dataset_name=args.input.stem, **kwargs)
+    else:
+        metrics = service.run_benchmark_pipeline(
+            dataset_name=args.dataset,
+            max_samples=args.max_samples,
+            top_n_classes=args.top_n_classes,
+            **kwargs,
+        )
+    plots = (
+        container.report_view.save_plots(metrics) if metrics.get("evaluated") else {}
+    )
+    container.report_view.render_markdown_report(
+        metrics, plot_paths=plots, report_path=args.report_path
+    )
+    print(
+        json.dumps(
+            {k: v for k, v in metrics.items() if not k.startswith("_")},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 

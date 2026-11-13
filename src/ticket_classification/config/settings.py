@@ -72,6 +72,9 @@ class AppSettings(GatewayBaseSettings):
 
     config_path: str = Field(default="configs/pipeline_config.yaml")
     data_dir: str = Field(default="data")
+    domain_id: str = Field(default="generic", pattern=r"^[a-zA-Z0-9_-]+$")
+    embedding_revision: str = ""
+    embedding_task: str = "clustering"
     domain_context: str = Field(
         default="General Customer Support, Inquiries, Incidents, and Claims",
         description="Domain or industry context injected into taxonomy generation prompts",
@@ -129,8 +132,11 @@ class AppSettings(GatewayBaseSettings):
         )
         opts = connection_options(self, embedding=True)
         base = opts.get("api_base", "")
-        dims = self.embedding_dimensions or 1536
-        payload = json.dumps([model, base, dims], sort_keys=True)
+        dims = self.embedding_dimensions
+        payload = json.dumps(
+            [model, base, dims, self.embedding_revision, self.embedding_task],
+            sort_keys=True,
+        )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def load_pipeline_yaml(self) -> dict[str, Any]:

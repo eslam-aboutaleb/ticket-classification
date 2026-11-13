@@ -36,7 +36,9 @@ class MetadataFeaturePipeline(LeakageSafePipelineStage[pd.DataFrame, np.ndarray]
         parts: list[np.ndarray] = []
 
         # Text length, token count, and missing text indicators
-        text_series = df.get("raw_text", pd.Series([""] * len(df))).fillna("")
+        text_series = (
+            df.get("raw_text", pd.Series([""] * len(df))).fillna("").astype(str)
+        )
         char_len = text_series.str.len().to_numpy(dtype=float).reshape(-1, 1)
         word_count = (
             text_series.str.split().str.len().to_numpy(dtype=float).reshape(-1, 1)
@@ -49,9 +51,9 @@ class MetadataFeaturePipeline(LeakageSafePipelineStage[pd.DataFrame, np.ndarray]
         # Date parsing and missing indicator generation
         for col in self.date_cols:
             if col in df.columns:
-                ts = pd.to_datetime(df[col], errors="coerce")
+                ts = pd.to_datetime(df[col], errors="coerce", utc=True)
                 is_missing = ts.isna().astype(float).to_numpy().reshape(-1, 1)
-                ts_num = (ts.astype("int64") // 10**9).astype(float)
+                ts_num = (ts - pd.Timestamp("1970-01-01", tz="UTC")).dt.total_seconds()
                 ts_num = ts_num.where(~ts.isna(), 0.0).to_numpy().reshape(-1, 1)
                 parts.extend([ts_num, is_missing])
 
@@ -70,6 +72,7 @@ class MetadataFeaturePipeline(LeakageSafePipelineStage[pd.DataFrame, np.ndarray]
         return np.hstack(parts) if parts else np.zeros((len(df), 1), dtype=float)
 
     def _fit_impl(self, train_data: pd.DataFrame) -> None:
+        train_data = self._schema_frame(train_data)
         num_mat = self._extract_numeric_and_dates(train_data, is_fit=True)
         self._scaler = StandardScaler()
         self._scaler.fit(num_mat)
@@ -79,7 +82,9 @@ class MetadataFeaturePipeline(LeakageSafePipelineStage[pd.DataFrame, np.ndarray]
             self._ordinal_encoder = OrdinalEncoder(
                 handle_unknown="use_encoded_value", unknown_value=-1
             )
-            ord_df = train_data[valid_ord].fillna("MISSING").astype(str)
+            ord_df = (
+                train_data[valid_ord].astype("object").fillna("MISSING").astype(str)
+            )
             self._ordinal_encoder.fit(ord_df)
 
         valid_nom = [c for c in self.nominal_cols if c in train_data.columns]
@@ -89,22 +94,41 @@ class MetadataFeaturePipeline(LeakageSafePipelineStage[pd.DataFrame, np.ndarray]
                 max_categories=self.max_onehot_categories,
                 sparse_output=False,
             )
-            nom_df = train_data[valid_nom].fillna("MISSING").astype(str)
+            nom_df = (
+                train_data[valid_nom].astype("object").fillna("MISSING").astype(str)
+            )
             self._onehot_encoder.fit(nom_df)
 
     def _transform_impl(self, data: pd.DataFrame) -> np.ndarray:
         assert self._scaler is not None
+        data = self._schema_frame(data)
+        if not len(data):
+            return np.empty((0, self._transform_impl(data.reindex(index=[0])).shape[1]))
         num_mat = self._extract_numeric_and_dates(data, is_fit=False)
         blocks = [self._scaler.transform(num_mat)]
 
         valid_ord = [c for c in self.ordinal_cols if c in data.columns]
         if self._ordinal_encoder is not None and valid_ord:
-            ord_df = data[valid_ord].fillna("MISSING").astype(str)
+            ord_df = data[valid_ord].astype("object").fillna("MISSING").astype(str)
             blocks.append(self._ordinal_encoder.transform(ord_df))
 
         valid_nom = [c for c in self.nominal_cols if c in data.columns]
         if self._onehot_encoder is not None and valid_nom:
-            nom_df = data[valid_nom].fillna("MISSING").astype(str)
+            nom_df = data[valid_nom].astype("object").fillna("MISSING").astype(str)
             blocks.append(self._onehot_encoder.transform(nom_df))
 
         return np.hstack(blocks)
+
+    def _schema_frame(self, data: pd.DataFrame) -> pd.DataFrame:
+        columns = list(
+            dict.fromkeys(
+                [
+                    "raw_text",
+                    *self.date_cols,
+                    *self.ordinal_cols,
+                    *self.nominal_cols,
+                    *self.numeric_cols,
+                ]
+            )
+        )
+        return data.reindex(columns=columns)

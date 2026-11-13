@@ -42,13 +42,17 @@ cleaning:
 
 embedding:
   batch_size: 64
-  cache_db_path: "data/cache/embeddings_cache.sqlite"
+  cache_db_path: "cache/embeddings_cache.sqlite"
+  multilingual: true
 
 clustering:
-  default_strategy: "aligned_kmeans" # options: aligned_kmeans, hdbscan_density, nmf_topic
-  umap_components: 10
-  k_min: 4
-  k_max: 20
+  default_strategy: "hdbscan_density" # aligned_kmeans, hdbscan_density, density (legacy DBSCAN)
+  reducer: "pca" # pca, umap (install discovery extra), none
+  n_components: 10
+  candidate_budget: 24
+  silhouette_sample_size: 1000
+  k_min: null
+  k_max: null
   outlier_recovery_threshold: 0.55
   min_cluster_support: 3
 

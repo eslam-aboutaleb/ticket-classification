@@ -63,6 +63,7 @@ class ClassifierSuite:
         mask = mask & np.isin(cluster_ids, list(valid_classes))
 
         self.valid_classes_ = valid_classes
+        self.training_mask_ = mask
         return X[mask], cluster_ids[mask]
 
     def fit_all(
@@ -73,6 +74,7 @@ class ClassifierSuite:
         confidences_train: np.ndarray,
     ) -> dict[str, object]:
         """Fit baseline, linear, SVM, and gradient boosted classifiers on filtered pseudo-labels."""
+        self.best_model_name_ = "logistic_regression"
         X_clean, y_clean = self.filter_pseudo_labels(
             X_train, cluster_ids_train, confidences_train
         )
@@ -87,7 +89,7 @@ class ClassifierSuite:
         unique_classes = sorted(self.valid_classes_)
         centroids = []
         for c in unique_classes:
-            c_vecs = norm_emb[cluster_ids_train == c]
+            c_vecs = norm_emb[(cluster_ids_train == c) & self.training_mask_]
             centroids.append(
                 normalize(c_vecs.mean(axis=0, keepdims=True), norm="l2")[0]
             )
@@ -144,6 +146,7 @@ class ClassifierSuite:
             "logistic_regression": logreg,
             "calibrated_linear_svc": svc,
             "gradient_boosting": gbdt,
+            "frozen_prototype": None,
         }
         return self.models_
 
@@ -155,6 +158,14 @@ class ClassifierSuite:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Return (pred_cluster_ids, confidences, margins, is_open_set_novel, centroid_distances)."""
         target_name = model_name or self.best_model_name_
+        if not len(X):
+            return (
+                np.empty(0, dtype=int),
+                np.empty(0),
+                np.empty(0),
+                np.empty(0, dtype=bool),
+                np.empty(0),
+            )
         if not self.models_:
             n = len(X)
             return (
@@ -164,10 +175,19 @@ class ClassifierSuite:
                 np.ones(n, dtype=bool),
                 np.ones(n),
             )
-        clf = self.models_[target_name]
-
-        probs = clf.predict_proba(X)
-        classes = clf.classes_
+        if target_name == "frozen_prototype":
+            similarities = normalize(embeddings) @ self.centroids_.T
+            weights = np.exp(
+                (similarities - similarities.max(axis=1, keepdims=True)) / 0.1
+            )
+            probs = weights / weights.sum(axis=1, keepdims=True)
+            classes = np.array(
+                [self.class_index_to_id_[i] for i in range(len(self.centroids_))]
+            )
+        else:
+            clf = self.models_[target_name]
+            probs = clf.predict_proba(X)
+            classes = clf.classes_
         sorted_probs = np.sort(probs, axis=1)
         top_idx = np.argmax(probs, axis=1)
         preds = np.array([int(classes[i]) for i in top_idx], dtype=int)
@@ -179,12 +199,18 @@ class ClassifierSuite:
         )
 
         assert self.centroids_ is not None
-        norm_emb = normalize(embeddings, norm="l2")
-        cos_sims = norm_emb @ self.centroids_.T
-        centroid_dists = 1.0 - np.max(cos_sims, axis=1)
-        is_open_set = centroid_dists > self.distance_threshold_
+        centroid_dists, is_open_set = self.novelty_scores(embeddings)
 
         return preds, confidences, margins, is_open_set, centroid_dists
+
+    def novelty_scores(self, embeddings: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Shared evaluation/serving novelty gate, with no projected-space threshold mixing."""
+        if self.centroids_ is None or not len(self.centroids_):
+            return np.ones(len(embeddings)), np.ones(len(embeddings), dtype=bool)
+        if not len(embeddings):
+            return np.empty(0), np.empty(0, dtype=bool)
+        distances = 1.0 - np.max(normalize(embeddings) @ self.centroids_.T, axis=1)
+        return distances, distances > self.distance_threshold_
 
     def calibrate_novelty(self, embeddings: np.ndarray) -> None:
         """Fit the serving gate on held-out known examples in original embedding space."""

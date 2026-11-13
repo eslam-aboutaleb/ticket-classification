@@ -21,6 +21,10 @@ class TicketRecord:
     template_signature: str = ""
     cluster_id: int | None = None
     cluster_confidence: float = 0.0
+    languages: list[str] = field(default_factory=list)
+    language_confidence: float = 0.0
+    language_status: str = "undetermined"
+    language_hint: str | None = None
 
 
 @dataclass
@@ -35,6 +39,10 @@ class ClusterProfile:
     signature: str
     routing_queue: str
     centroid: list[float] = field(default_factory=list)
+    stable_id: str = ""
+    route_id: str = "general"
+    keywords_by_language: dict[str, list[str]] = field(default_factory=dict)
+    localized_labels: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -64,3 +72,13 @@ class PredictionResult:
     provider_used: str
     top_contributing_terms: list[str] = field(default_factory=list)
     reasoning: str = ""
+    status: str = "known"
+    domain_id: str = "generic"
+    taxonomy_version: str = ""
+    stable_cluster_id: str | None = None
+    route_id: str | None = None
+    input_languages: list[str] = field(default_factory=list)
+    language_confidence: float = 0.0
+    language_status: str = "undetermined"
+    language_hint: str | None = None
+    display_language: str = "en"

@@ -1,0 +1,73 @@
+# Use --config configs/profiles.example.yaml --domain-id customer_claim.
+# Enable only languages covered by your validated multilingual embedding deployment.
+embedding:
+  multilingual: true
+  batch_size: 64
+
+clustering:
+  default_strategy: hdbscan_density
+  reducer: pca
+  min_cluster_support: 3
+  candidate_budget: 24
+
+profiles:
+  customer_claim:
+    id: customer_claim
+    context: Customer claims, disputed payments, refunds and compensation
+    text_col: narrative
+    id_col: claim_id
+    label_col: null
+    group_col: conversation_id
+    language_hint_col: language
+    chunk_chars: 4000
+    language:
+      supported: [en, ar, fr, es, de, zh-cn]
+      display_language: en
+      preserve_tokens: [not, never, لم, لا]
+      arabic_remove_diacritics: false
+      arabic_fold_alef: false
+    cleaning:
+      normalize_redactions: true
+      pii_patterns:
+        EGYPT_PHONE: '\b(?:\+?20)?0?1[0125]\d{8}\b'
+        ACCOUNT_ID: '\bACC[-_]\d+\b'
+    metadata:
+      numeric_cols: [amount]
+      nominal_cols: [product]
+    routes:
+      claims: Claims review
+      refunds: Refund operations
+    default_route: claims
+    review_queue: Claims requiring review
+
+  technical_incident:
+    id: technical_incident
+    context: Technical support incidents and production errors
+    text_col: description
+    id_col: incident_id
+    group_col: conversation_id
+    language:
+      supported: [en, ar]
+      preserve_tokens: [HTTP, '403', '404', '500']
+    cleaning:
+      template_mask_numbers: false
+      normalize_redactions: false
+    metadata:
+      nominal_cols: [service, environment]
+    routes:
+      operations: Technical operations
+    default_route: operations
+
+  customer_service:
+    id: customer_service
+    context: Customer inquiries about products, orders and delivery
+    text_col: body
+    id_col: request_id
+    group_col: conversation_id
+    language:
+      supported: [en, ar]
+    metadata:
+      nominal_cols: [product]
+    routes:
+      support: Customer service
+    default_route: support

@@ -1,0 +1,24 @@
+{"ticket_id": "payment-0", "raw_text": "My card payment was declined at the shop and I need help completing this purchase", "label": "payment"}
+{"ticket_id": "payment-1", "raw_text": "The payment failed but the money was removed from my account for this transaction", "label": "payment"}
+{"ticket_id": "payment-2", "raw_text": "I was charged twice for one card purchase and need the duplicate payment refunded", "label": "payment"}
+{"ticket_id": "payment-3", "raw_text": "My online purchase payment is still pending and I cannot complete the order", "label": "payment"}
+{"ticket_id": "payment-4", "raw_text": "حاولت ادفع بالكارت في المحل لكن عملية الدفع اترفضت ومحتاج مساعدة", "label": "payment"}
+{"ticket_id": "payment-5", "raw_text": "عملية الدفع فشلت لكن الفلوس اتخصمت من الحساب ومحتاج استرجع المبلغ", "label": "payment"}
+{"ticket_id": "payment-6", "raw_text": "اتخصم مني المبلغ مرتين لنفس عملية الشراء بالكارت ومحتاج استرداد", "label": "payment"}
+{"ticket_id": "payment-7", "raw_text": "دفعت اونلاين لكن المعاملة لسه معلقة والطلب مش بيتأكد عندي", "label": "payment"}
+{"ticket_id": "delivery-0", "raw_text": "My parcel delivery is late and the tracking page has not changed for several days", "label": "delivery"}
+{"ticket_id": "delivery-1", "raw_text": "The courier marked my order delivered but I have not received the package", "label": "delivery"}
+{"ticket_id": "delivery-2", "raw_text": "My delivery arrived at the wrong address and I need the parcel redirected", "label": "delivery"}
+{"ticket_id": "delivery-3", "raw_text": "I need to change the delivery address before the courier brings my order", "label": "delivery"}
+{"ticket_id": "delivery-4", "raw_text": "الطلب اتأخر في التوصيل ومفيش تحديث في صفحة تتبع الشحنة من كام يوم", "label": "delivery"}
+{"ticket_id": "delivery-5", "raw_text": "شركة الشحن قالت إن الطلب اتسلم لكن انا مستلمتش أي طرد ومحتاج اعرف مكانه", "label": "delivery"}
+{"ticket_id": "delivery-6", "raw_text": "الشحنة وصلت على عنوان غلط ومحتاج اغير مكان توصيل الطلب", "label": "delivery"}
+{"ticket_id": "delivery-7", "raw_text": "محتاج اغير عنوان التوصيل قبل ما المندوب يجيب الطلب للبيت", "label": "delivery"}
+{"ticket_id": "technical-0", "raw_text": "The application server returns HTTP 500 whenever I open the dashboard", "label": "technical"}
+{"ticket_id": "technical-1", "raw_text": "The website is unavailable because the database connection keeps timing out", "label": "technical"}
+{"ticket_id": "technical-2", "raw_text": "The service crashes with an exception when users try to load the main page", "label": "technical"}
+{"ticket_id": "technical-3", "raw_text": "The API endpoint returns a server error instead of loading the requested data", "label": "technical"}
+{"ticket_id": "technical-4", "raw_text": "السيرفر بيرجع خطأ HTTP 500 كل ما افتح لوحة التحكم في التطبيق", "label": "technical"}
+{"ticket_id": "technical-5", "raw_text": "الموقع مش شغال لأن الاتصال بقاعدة البيانات بيفشل ومحتاجين نصلح المشكلة", "label": "technical"}
+{"ticket_id": "technical-6", "raw_text": "الخدمة بتقع وبيظهر خطأ في التطبيق لما المستخدم يحاول يفتح الصفحة الرئيسية", "label": "technical"}
+{"ticket_id": "technical-7", "raw_text": "واجهة الخدمة بترجع خطأ من السيرفر بدل ما تحمل البيانات المطلوبة", "label": "technical"}

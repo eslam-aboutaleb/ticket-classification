@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import joblib
 
@@ -24,7 +25,13 @@ class ModelRegistryRepository:
     def save_bundle(self, bundle: dict[str, Any]) -> str:
         """Persist the fitted pipeline bundle atomically to disk."""
         self.registry_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.registry_path.with_suffix(".joblib.tmp")
+        version = bundle.get("taxonomy_version")
+        if version:
+            versions = self.registry_path.parent / "versions"
+            versions.mkdir(parents=True, exist_ok=True)
+            with (versions / f"{version}.joblib").open("xb") as fh:
+                joblib.dump(bundle, fh, compress=3)
+        tmp_path = self.registry_path.with_suffix(f".{uuid4().hex}.tmp")
         joblib.dump(bundle, tmp_path, compress=3)
         tmp_path.replace(self.registry_path)
         return str(self.registry_path)

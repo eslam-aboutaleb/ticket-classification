@@ -27,6 +27,8 @@ data/cache/*
 !data/cache/.gitkeep
 data/artifacts/*
 !data/artifacts/.gitkeep
+data/live_smoke/
+data/review_queue.sqlite*
 
 # OS & IDE
 .DS_Store

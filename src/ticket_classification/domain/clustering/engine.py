@@ -1,13 +1,15 @@
-"""Clustering workflows, cluster count estimation, centroid alignment, and keyword extraction."""
+"""Dataset-driven discovery with explicit fitted assignments and frozen prediction."""
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-from sklearn.cluster import DBSCAN, KMeans
+from sklearn.cluster import DBSCAN, HDBSCAN, KMeans
 from sklearn.decomposition import PCA
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics import silhouette_score
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics import adjusted_rand_score, silhouette_score
 from sklearn.preprocessing import normalize
 
 from ticket_classification.domain.base_stage import LeakageSafePipelineStage
@@ -17,119 +19,211 @@ from ticket_classification.models.entities import AlignmentResult
 class ClusteringEngine(
     LeakageSafePipelineStage[np.ndarray, tuple[np.ndarray, np.ndarray]]
 ):
-    """Implements DeepAligned K-Means, Density Clustering, Silhouette optimization, and Hungarian alignment."""
+    """Discover groups offline; predict by frozen prototypes online.
+
+    HDBSCAN is sklearn's implementation. Prototype prediction is a separate
+    inductive baseline, not HDBSCAN approximate_predict or discovery of new groups.
+    """
 
     def __init__(
         self,
         strategy: str = "aligned_kmeans",
-        k_min: int = 4,
-        k_max: int = 15,
+        k_min: int | None = None,
+        k_max: int | None = None,
         n_components: int = 10,
         outlier_recovery_threshold: float = 0.55,
         random_state: int = 42,
+        reducer: str = "pca",
+        min_cluster_support: int = 3,
+        candidate_budget: int = 24,
+        silhouette_sample_size: int = 1000,
+        recover_noise: bool = False,
+        single_cluster_min_similarity: float = 0.75,
     ) -> None:
         super().__init__()
-        self.strategy = strategy
-        self.k_min = k_min
-        self.k_max = k_max
-        self.n_components = n_components
+        if strategy not in {"aligned_kmeans", "hdbscan_density", "density"}:
+            raise ValueError(f"Unsupported discovery strategy: {strategy}")
+        if reducer not in {"none", "pca", "umap"}:
+            raise ValueError(f"Unsupported reducer: {reducer}")
+        if k_min is not None and (k_min < 2 or k_max is not None and k_min > k_max):
+            raise ValueError("Invalid K bounds")
+        self.strategy, self.k_min, self.k_max = strategy, k_min, k_max
+        self.n_components, self.reducer = n_components, reducer
         self.outlier_recovery_threshold = outlier_recovery_threshold
-        self.random_state = random_state
-
-        self._projector: PCA | None = None
+        self.random_state, self.min_cluster_support = random_state, min_cluster_support
+        self.candidate_budget, self.silhouette_sample_size = (
+            candidate_budget,
+            silhouette_sample_size,
+        )
+        self.recover_noise, self.single_cluster_min_similarity = (
+            recover_noise,
+            single_cluster_min_similarity,
+        )
+        self._projector: Any = None
         self.centroids_: np.ndarray | None = None
         self.raw_space_centroids_: np.ndarray | None = None
         self.train_labels_: np.ndarray | None = None
-        self.optimal_k_: int = k_min
-        self.dropout_viable_k_: int = k_min
-        self.hit_k_max_boundary_: bool = False
-        self.best_silhouette_: float = 0.0
+        self.train_strengths_: np.ndarray | None = None
+        self.optimal_k_ = self.dropout_viable_k_ = 0
+        self.hit_k_max_boundary_ = False
+        self.best_silhouette_ = 0.0
         self.silhouette_history_: dict[int, float] = {}
         self.last_alignment_: AlignmentResult | None = None
+        self.diagnostics_: dict[str, Any] = {}
 
     def _project_embeddings(self, embeddings: np.ndarray, is_fit: bool) -> np.ndarray:
-        embeddings = np.asarray(embeddings, dtype=float)
-        if embeddings.ndim != 2 or not np.isfinite(embeddings).all():
-            raise ValueError("Embeddings must be a finite two-dimensional matrix")
-        if not len(embeddings):
-            width = (
-                self._projector.n_components_
-                if self._projector is not None
-                else embeddings.shape[1]
+        data = np.asarray(embeddings, dtype=float)
+        if data.ndim != 2 or not np.isfinite(data).all() or data.shape[1] == 0:
+            raise ValueError(
+                "Embeddings must be a finite two-dimensional matrix with features"
             )
+        if not len(data):
+            width = getattr(self, "projected_width_", data.shape[1])
             return np.empty((0, width))
-        normed = normalize(embeddings, norm="l2")
+        normed = normalize(data)
         if not is_fit:
+            if data.shape[1] != self.input_width_:
+                raise ValueError(
+                    "Embedding dimensions differ from fitted discovery model"
+                )
             return (
-                normalize(self._projector.transform(normed), norm="l2")
+                self._projector.transform(normed)
                 if self._projector is not None
                 else normed
             )
+        self.input_width_ = data.shape[1]
         self._projector = None
-        n_comp = min(self.n_components, normed.shape[0] - 1, normed.shape[1])
-        if n_comp < 2:
-            return normed
-        self._projector = PCA(n_components=n_comp, random_state=self.random_state)
-        return normalize(self._projector.fit_transform(normed), norm="l2")
+        n_comp = min(self.n_components, len(data) - 1, data.shape[1])
+        if self.reducer == "none" or n_comp < 2 or len(np.unique(normed, axis=0)) < 2:
+            projected = normed
+        elif self.reducer == "umap":
+            try:
+                from umap import UMAP
+            except ImportError as exc:
+                raise ValueError(
+                    "UMAP requires pip install 'ticket-classification[discovery]'"
+                ) from exc
+            if len(data) < 4:
+                projected = normed
+            else:
+                self._projector = UMAP(
+                    n_components=n_comp,
+                    n_neighbors=min(15, len(data) - 1),
+                    metric="cosine",
+                    init="random",
+                    random_state=self.random_state,
+                    transform_seed=self.random_state,
+                    n_jobs=1,
+                )
+                projected = self._projector.fit_transform(normed)
+        else:
+            self._projector = PCA(n_components=n_comp, random_state=self.random_state)
+            projected = self._projector.fit_transform(normed)
+        self.projected_width_ = projected.shape[1]
+        return projected
 
     def fit_transform(self, train_data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Return discovery assignments, preserving fitted noise and recovery decisions."""
         self.fit(train_data)
-        assert self.train_labels_ is not None
-        _, strengths = self.transform(train_data)
-        return self.train_labels_.copy(), np.where(
-            self.train_labels_ >= 0, strengths, 0.0
+        return self.train_labels_.copy(), self.train_strengths_.copy()
+
+    def _quality(self, original: np.ndarray, labels: np.ndarray) -> tuple[float, float]:
+        valid = labels >= 0
+        groups, counts = np.unique(labels[valid], return_counts=True)
+        coverage = float(np.mean(valid))
+        if len(groups) < 2 or np.sum(valid) <= len(groups):
+            return -1.0, 0.0
+        # A fixed sample makes candidate comparisons reproducible and bounds pairwise work.
+        indices = np.random.default_rng(self.random_state).permutation(len(labels))[
+            : self.silhouette_sample_size
+        ]
+        indices = indices[valid[indices]]
+        sample_labels = labels[indices]
+        if len(np.unique(sample_labels)) < 2 or len(np.unique(sample_labels)) >= len(
+            indices
+        ):
+            return -1.0, 0.0
+        separation = float(
+            silhouette_score(original[indices], sample_labels, metric="cosine")
         )
+        unsupported = float(
+            np.sum(counts[counts < self.min_cluster_support]) / len(labels)
+        )
+        return separation * coverage - 0.25 * (1 - coverage) - unsupported, separation
 
     def predict_k_with_dropout_and_silhouette(
         self, projected: np.ndarray
     ) -> tuple[int, float]:
-        """Estimates cluster count by combining density-filtered upper-bound clustering with silhouette validation."""
-        n_samples = projected.shape[0]
-        if n_samples < 4 or len(np.unique(projected, axis=0)) < 2:
+        """Adaptive K-Means baseline; method name retained for source compatibility."""
+        original = self._fit_original
+        unique_count = len(np.unique(projected, axis=0))
+        feasible = min(
+            unique_count,
+            max(1, len(projected) // self.min_cluster_support),
+            len(projected) - 1,
+        )
+        if feasible < 2:
             return 1, 0.0
-        max_k = min(
-            self.k_max,
-            max(self.k_min, n_samples // 4),
-            n_samples - 1,
-            len(np.unique(projected, axis=0)),
+        lower = min(self.k_min or 2, feasible)
+        # This is an explicit compute ceiling, not a claimed upper bound on true intents.
+        upper = min(self.k_max or feasible, feasible)
+        candidates = set(
+            np.geomspace(
+                lower, upper, min(max(2, self.candidate_budget // 2), upper - lower + 1)
+            )
+            .round()
+            .astype(int)
         )
-        min_k = min(self.k_min, max_k)
+        evaluated: dict[int, tuple[float, float, float]] = {}
 
-        km_upper = KMeans(
-            n_clusters=max_k, n_init=10, random_state=self.random_state
-        ).fit(projected)
-        dropout_threshold = n_samples / max_k
-        viable_count = sum(
-            1
-            for c in np.unique(km_upper.labels_)
-            if np.sum(km_upper.labels_ == c) >= dropout_threshold * 0.5
-        )
-        self.dropout_viable_k_ = max(min_k, viable_count)
-
-        best_k = self.dropout_viable_k_
-        best_score = -1.0
-        best_adjusted = -1.0
-        self.silhouette_history_ = {}
-
-        for k in range(min_k, max_k + 1):
-            if k >= n_samples:
-                continue
-            km = KMeans(n_clusters=k, n_init=10, random_state=self.random_state).fit(
+        def evaluate(k: int) -> None:
+            if (
+                k in evaluated
+                or len(evaluated) >= self.candidate_budget
+                or not lower <= k <= upper
+            ):
+                return
+            km = KMeans(n_clusters=k, n_init=5, random_state=self.random_state).fit(
                 projected
             )
-            if len(np.unique(km.labels_)) < 2:
-                continue
-            score = float(silhouette_score(projected, km.labels_, metric="cosine"))
-            self.silhouette_history_[k] = score
-            adjusted = score - 0.0015 * abs(k - self.dropout_viable_k_)
-            if adjusted > best_adjusted:
-                best_adjusted = adjusted
-                best_score = score
-                best_k = k
+            other = KMeans(
+                n_clusters=k, n_init=3, random_state=self.random_state + 1
+            ).fit(projected)
+            quality, separation = self._quality(original, km.labels_)
+            stability = float(adjusted_rand_score(km.labels_, other.labels_))
+            evaluated[k] = (quality + 0.1 * stability, separation, stability)
 
-        self.hit_k_max_boundary_ = best_k >= max_k
-        return best_k, best_score
+        for k in sorted(candidates):
+            evaluate(int(k))
+        while len(evaluated) < self.candidate_budget:
+            best = max(evaluated, key=lambda k: evaluated[k][0])
+            ordered = sorted(evaluated)
+            neighbors = [lower - 1, *ordered, upper + 1]
+            pos = neighbors.index(best)
+            additions = [
+                (neighbors[pos - 1] + best) // 2,
+                (best + neighbors[pos + 1] + 1) // 2,
+            ]
+            before = len(evaluated)
+            for k in additions:
+                evaluate(k)
+            if len(evaluated) == before:
+                break
+        best = max(evaluated, key=lambda k: evaluated[k][0])
+        self.silhouette_history_ = {
+            k: result[1] for k, result in sorted(evaluated.items())
+        }
+        self.hit_k_max_boundary_ = best == upper
+        self.dropout_viable_k_ = best
+        self.diagnostics_.update(
+            candidate_bounds=[lower, upper],
+            candidate_budget=self.candidate_budget,
+            budget_exhausted=len(evaluated) >= self.candidate_budget,
+            candidates=[
+                {"k": k, "score": v[0], "silhouette": v[1], "seed_stability_ari": v[2]}
+                for k, v in sorted(evaluated.items())
+            ],
+        )
+        return best, evaluated[best][1]
 
     def align_centroids_hungarian(
         self,
@@ -138,7 +232,6 @@ class ClusteringEngine(
         reference_centroids: np.ndarray | None = None,
         candidate_raw_centroids: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, dict[int, int]]:
-        """Align new cluster centroids to previous centroids via linear_sum_assignment."""
         ref = (
             reference_centroids if reference_centroids is not None else self.centroids_
         )
@@ -148,172 +241,209 @@ class ClusteringEngine(
             else new_centroids
         )
         if ref is None or ref.shape != cand.shape:
-            identity_map = {i: i for i in range(len(new_centroids))}
-            return new_centroids, labels, identity_map
-
-        dist_matrix = np.linalg.norm(
-            ref[:, np.newaxis, :] - cand[np.newaxis, :, :],
-            axis=2,
+            return new_centroids, labels, {i: i for i in range(len(new_centroids))}
+        rows, columns = linear_sum_assignment(
+            np.linalg.norm(ref[:, None, :] - cand[None, :, :], axis=2)
         )
-        row_ind, col_ind = linear_sum_assignment(dist_matrix)
-        aligned_centroids = np.zeros_like(new_centroids)
-        pseudo_to_aligned: dict[int, int] = {}
-
-        for canonical_idx, raw_idx in zip(row_ind, col_ind):
-            aligned_centroids[canonical_idx] = new_centroids[raw_idx]
-            pseudo_to_aligned[int(raw_idx)] = int(canonical_idx)
-
-        aligned_labels = np.array(
-            [pseudo_to_aligned.get(int(lbl), int(lbl)) for lbl in labels],
-            dtype=int,
-        )
-        return aligned_centroids, aligned_labels, pseudo_to_aligned
+        mapping = {int(c): int(r) for r, c in zip(rows, columns)}
+        aligned = np.zeros_like(new_centroids)
+        for source, target in mapping.items():
+            aligned[target] = new_centroids[source]
+        return aligned, np.array([mapping.get(int(x), int(x)) for x in labels]), mapping
 
     def recover_outliers(
-        self,
-        projected: np.ndarray,
-        labels: np.ndarray,
-        centroids: np.ndarray,
+        self, projected: np.ndarray, labels: np.ndarray, centroids: np.ndarray
     ) -> tuple[np.ndarray, int, int]:
-        """Reassigns unassigned points to the nearest centroid if cosine similarity meets the threshold."""
         recovered = labels.copy()
-        outlier_mask = recovered == -1
-        if not np.any(outlier_mask) or len(centroids) == 0:
-            return recovered, 0, int(np.sum(outlier_mask))
-
-        norm_pts = normalize(projected[outlier_mask], norm="l2")
-        norm_cents = normalize(centroids, norm="l2")
-        sims = norm_pts @ norm_cents.T
-        best_cluster = np.argmax(sims, axis=1)
-        best_sim = np.max(sims, axis=1)
-
-        reassigned_count = 0
-        outlier_indices = np.where(outlier_mask)[0]
-        for idx, clu_id, sim in zip(outlier_indices, best_cluster, best_sim):
-            if sim >= self.outlier_recovery_threshold:
-                recovered[idx] = int(clu_id)
-                reassigned_count += 1
-
-        remaining_outliers = int(np.sum(recovered == -1))
-        return recovered, reassigned_count, remaining_outliers
+        indices = np.where(labels == -1)[0]
+        if not len(indices) or not len(centroids):
+            return recovered, 0, len(indices)
+        sims = normalize(projected[indices]) @ normalize(centroids).T
+        accepted = sims.max(axis=1) >= self.outlier_recovery_threshold
+        recovered[indices[accepted]] = sims.argmax(axis=1)[accepted]
+        return recovered, int(accepted.sum()), int(np.sum(recovered == -1))
 
     def _fit_impl(self, train_data: np.ndarray) -> None:
-        if len(train_data) == 0:
+        if not len(train_data):
             raise ValueError("Discovery requires at least one embedding")
         projected = self._project_embeddings(train_data, is_fit=True)
-
-        if self.strategy == "density":
-            db = DBSCAN(eps=0.35, min_samples=3, metric="cosine").fit(projected)
-            raw_labels = db.labels_
-            unique_valid = [c for c in np.unique(raw_labels) if c != -1]
-            if len(unique_valid) < 2:
-                # Fallback to aligned K-Means if density parameters collapse
-                self.optimal_k_, self.best_silhouette_ = (
-                    self.predict_k_with_dropout_and_silhouette(projected)
-                )
-                km = KMeans(
-                    n_clusters=self.optimal_k_,
-                    n_init=10,
-                    random_state=self.random_state,
-                ).fit(projected)
-                raw_labels = km.labels_
-                raw_centroids = normalize(km.cluster_centers_, norm="l2")
-            else:
-                self.optimal_k_ = len(unique_valid)
-                raw_centroids = normalize(
-                    np.vstack(
-                        [projected[raw_labels == c].mean(axis=0) for c in unique_valid]
-                    ),
-                    norm="l2",
-                )
-                remap = {old_c: new_c for new_c, old_c in enumerate(unique_valid)}
-                raw_labels = np.array(
-                    [remap.get(int(c), -1) for c in raw_labels], dtype=int
-                )
-                valid_mask = raw_labels != -1
-                self.best_silhouette_ = (
-                    float(
-                        silhouette_score(
-                            projected[valid_mask],
-                            raw_labels[valid_mask],
-                            metric="cosine",
+        original = normalize(train_data)
+        self._fit_original = original
+        self.diagnostics_ = {
+            "strategy": self.strategy,
+            "reducer": self.reducer,
+            "prediction": "frozen_centroid_cosine",
+            "input_rows": len(train_data),
+            "unique_embeddings": len(np.unique(original, axis=0)),
+        }
+        self.silhouette_history_ = {}
+        self.hit_k_max_boundary_ = False
+        labels = np.full(len(projected), -1, dtype=int)
+        strengths = np.zeros(len(projected))
+        if not np.any(original):
+            self.diagnostics_["outcome"] = "no_usable_vectors"
+        elif (
+            len(projected) < self.min_cluster_support
+            or len(np.unique(original, axis=0)) == 1
+        ):
+            labels[:] = 0
+            strengths[:] = 1.0
+            self.diagnostics_["outcome"] = "single_cluster"
+        elif self.strategy == "aligned_kmeans":
+            k, self.best_silhouette_ = self.predict_k_with_dropout_and_silhouette(
+                projected
+            )
+            km = KMeans(n_clusters=k, n_init=10, random_state=self.random_state).fit(
+                projected
+            )
+            labels = km.labels_
+            centers = normalize(
+                np.vstack([original[labels == c].mean(axis=0) for c in range(k)])
+            )
+            strengths = np.sum(original * centers[labels], axis=1).clip(0, 1)
+            labels[strengths < self.outlier_recovery_threshold * 0.65] = -1
+        elif self.strategy == "density":
+            labels = DBSCAN(
+                eps=0.35, min_samples=self.min_cluster_support, metric="cosine"
+            ).fit_predict(normalize(projected))
+            strengths = (labels >= 0).astype(float)
+        else:
+            best_score = -np.inf
+            sizes = sorted(
+                {
+                    self.min_cluster_support,
+                    max(self.min_cluster_support, int(np.sqrt(len(projected)))),
+                    max(self.min_cluster_support, len(projected) // 20),
+                }
+            )
+            trials = []
+            for size in sizes:
+                if size > len(projected):
+                    continue
+                for samples in sorted({2, min(size, 5)}):
+                    if len(trials) >= self.candidate_budget:
+                        break
+                    model = HDBSCAN(
+                        min_cluster_size=size,
+                        min_samples=samples,
+                        allow_single_cluster=False,
+                        copy=True,
+                    ).fit(projected)
+                    score, separation = self._quality(original, model.labels_)
+                    subset = np.sort(
+                        np.random.default_rng(self.random_state).choice(
+                            len(projected),
+                            max(size, int(len(projected) * 0.8)),
+                            replace=False,
                         )
                     )
-                    if np.sum(valid_mask) > self.optimal_k_
-                    else 0.0
+                    repeated = HDBSCAN(
+                        min_cluster_size=size,
+                        min_samples=samples,
+                        allow_single_cluster=False,
+                        copy=True,
+                    ).fit_predict(projected[subset])
+                    stability = float(
+                        adjusted_rand_score(model.labels_[subset], repeated)
+                    )
+                    score += 0.1 * stability * float(np.mean(model.labels_ >= 0))
+                    trials.append(
+                        {
+                            "min_cluster_size": size,
+                            "min_samples": samples,
+                            "k": len(set(model.labels_) - {-1}),
+                            "score": score,
+                            "coverage": float(np.mean(model.labels_ >= 0)),
+                            "silhouette": separation,
+                            "resampling_stability_ari": stability,
+                        }
+                    )
+                    if score > best_score:
+                        best_score, labels, strengths = (
+                            score,
+                            model.labels_.copy(),
+                            model.probabilities_.copy(),
+                        )
+                        self.best_silhouette_ = separation
+            self.diagnostics_["candidates"] = trials
+            self.diagnostics_["budget_exhausted"] = len(trials) >= self.candidate_budget
+            if not np.any(labels >= 0):
+                center = normalize(original.mean(axis=0, keepdims=True))[0]
+                if (
+                    float(np.min(original @ center))
+                    >= self.single_cluster_min_similarity
+                ):
+                    labels[:] = 0
+                    strengths = (original @ center).clip(0, 1)
+        # Zero vectors cannot support semantic discovery.
+        labels[np.linalg.norm(train_data, axis=1) == 0] = -1
+        groups = sorted(set(labels) - {-1})
+        remap = {int(c): i for i, c in enumerate(groups)}
+        labels = np.array([remap.get(int(c), -1) for c in labels])
+        self.optimal_k_ = len(groups)
+        cents = (
+            normalize(
+                np.vstack(
+                    [projected[labels == c].mean(axis=0) for c in range(len(groups))]
                 )
-        else:
-            self.optimal_k_, self.best_silhouette_ = (
-                self.predict_k_with_dropout_and_silhouette(projected)
             )
-            km = KMeans(
-                n_clusters=self.optimal_k_, n_init=10, random_state=self.random_state
-            ).fit(projected)
-            raw_labels = km.labels_
-            raw_centroids = normalize(km.cluster_centers_, norm="l2")
-            # Flag extreme low-similarity peripheral points as noise (-1) candidates before outlier recovery
-            pt_sims = np.sum(projected * raw_centroids[raw_labels], axis=1)
-            raw_labels = np.where(
-                pt_sims < (self.outlier_recovery_threshold * 0.65), -1, raw_labels
+            if groups
+            else np.empty((0, projected.shape[1]))
+        )
+        raw = (
+            normalize(
+                np.vstack(
+                    [original[labels == c].mean(axis=0) for c in range(len(groups))]
+                )
             )
-
-        normed_raw = normalize(train_data, norm="l2")
-        candidate_raw_cents = normalize(
-            np.vstack(
-                [
-                    normed_raw[raw_labels == c].mean(axis=0)
-                    if np.any(raw_labels == c)
-                    else normed_raw.mean(axis=0)
-                    for c in range(len(raw_centroids))
-                ]
-            ),
-            norm="l2",
+            if groups
+            else np.empty((0, original.shape[1]))
         )
-
-        aligned_cents, aligned_labels, align_map = self.align_centroids_hungarian(
-            raw_centroids,
-            raw_labels,
-            reference_centroids=self.raw_space_centroids_,
-            candidate_raw_centroids=candidate_raw_cents,
+        cents, labels, mapping = self.align_centroids_hungarian(
+            cents, labels, self.raw_space_centroids_, raw
         )
-        recovered_labels, rec_count, rem_outliers = self.recover_outliers(
-            projected, aligned_labels, aligned_cents
-        )
-        self.train_labels_ = recovered_labels
-        self.centroids_ = aligned_cents
-        # Store aligned raw-space centroids so subsequent refits align in invariant embedding space
-        aligned_raw_cents = np.zeros_like(candidate_raw_cents)
-        for raw_idx, canonical_idx in align_map.items():
-            aligned_raw_cents[canonical_idx] = candidate_raw_cents[raw_idx]
-        self.raw_space_centroids_ = aligned_raw_cents
-
+        raw_aligned = np.zeros_like(raw)
+        for source, target in mapping.items():
+            raw_aligned[target] = raw[source]
+        recovered = 0
+        if self.recover_noise:
+            labels, recovered, _ = self.recover_outliers(original, labels, raw_aligned)
+        self.centroids_, self.raw_space_centroids_ = cents, raw_aligned
+        self.train_labels_ = labels
+        self.train_strengths_ = np.where(labels >= 0, strengths, 0.0)
         self.last_alignment_ = AlignmentResult(
-            num_clusters=self.optimal_k_,
-            silhouette_score=self.best_silhouette_,
-            recovered_outliers=rec_count,
-            remaining_outliers=rem_outliers,
-            alignment_map=align_map,
+            self.optimal_k_,
+            self.best_silhouette_,
+            recovered,
+            int(np.sum(labels == -1)),
+            mapping,
         )
+        self.diagnostics_.update(
+            selected_k=self.optimal_k_,
+            coverage=float(np.mean(labels >= 0)),
+            outcome="clusters" if groups else "all_noise",
+            hit_boundary=self.hit_k_max_boundary_,
+        )
+        del self._fit_original
 
     def _transform_impl(self, data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Return (cluster_ids, cosine_confidences) for any dataset split."""
-        assert self.centroids_ is not None
-        projected = self._project_embeddings(data, is_fit=False)
-        if len(projected) == 0:
+        self._project_embeddings(data, is_fit=False)  # validate fitted feature contract
+        if not len(data):
             return np.empty(0, dtype=int), np.empty(0)
-        norm_cents = normalize(self.centroids_, norm="l2")
-        sims = projected @ norm_cents.T
-        cluster_ids = np.argmax(sims, axis=1).astype(int)
-        confidences = np.clip(np.max(sims, axis=1), 0.0, 1.0)
-        return cluster_ids, confidences
+        if not len(self.raw_space_centroids_):
+            return np.full(len(data), -1), np.zeros(len(data))
+        sims = normalize(data) @ self.raw_space_centroids_.T
+        strengths = np.max(sims, axis=1).clip(0, 1)
+        return np.where(
+            strengths >= self.outlier_recovery_threshold * 0.65, sims.argmax(axis=1), -1
+        ), strengths
 
     def project_2d(self, embeddings: np.ndarray) -> np.ndarray:
-        """Project embeddings to 2D via PCA for visual scatterplots."""
-        normed = normalize(embeddings, norm="l2")
-        if normed.shape[0] < 3 or normed.shape[1] < 2:
-            return np.zeros((normed.shape[0], 2))
-        pca_2d = PCA(n_components=2, random_state=self.random_state)
-        return pca_2d.fit_transform(normed)
+        if len(embeddings) < 3 or embeddings.shape[1] < 2:
+            return np.zeros((len(embeddings), 2))
+        return PCA(n_components=2, random_state=self.random_state).fit_transform(
+            normalize(embeddings)
+        )
 
 
 def extract_c_tfidf_keywords_and_medoids(
@@ -325,7 +455,7 @@ def extract_c_tfidf_keywords_and_medoids(
     top_n_medoids: int = 3,
     raw_texts: list[str] | None = None,
 ) -> dict[int, tuple[list[str], list[str]]]:
-    """Extracts distinctive class-based TF-IDF keywords and representative medoid texts per cluster."""
+    """Extracts distinctive class-based TF-IDF keywords and centroid-nearest representative texts (legacy medoid field name) per cluster."""
     medoid_source = (
         contextual_texts if contextual_texts is not None else (raw_texts or [])
     )
@@ -342,8 +472,15 @@ def extract_c_tfidf_keywords_and_medoids(
         joined = " ".join(docs).strip()
         cluster_docs.append(joined if joined else "ticket")
 
-    vec = TfidfVectorizer(max_features=3000, ngram_range=(1, 2))
-    tfidf_mat = vec.fit_transform(cluster_docs).toarray()
+    vec = CountVectorizer(
+        max_features=3000, ngram_range=(1, 2), token_pattern=r"(?u)\b\w+\b"
+    )
+    counts = vec.fit_transform(cluster_docs).toarray().astype(float)
+    term_frequency = counts / np.maximum(counts.sum(axis=1, keepdims=True), 1)
+    inverse_frequency = np.log1p(
+        counts.sum(axis=1).mean() / np.maximum(counts.sum(axis=0), 1)
+    )
+    tfidf_mat = term_frequency * inverse_frequency
     vocab = np.array(vec.get_feature_names_out())
 
     norm_emb = normalize(embeddings, norm="l2")

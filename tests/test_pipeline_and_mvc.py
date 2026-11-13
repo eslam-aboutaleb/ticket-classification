@@ -98,8 +98,8 @@ class DeterministicMockGateway(BaseCloudGateway):
 def test_provider_switching_between_litellm_openai_and_gemini() -> None:
     """Verify that switching between litellm, openai, and gemini resolves distinct models and fingerprints."""
     settings = AppSettings(
-        gateway_base_url="https://82.70.210.36.sslip.io/v1",
-        gateway_api_key="sk-test-virtual-key-123456",
+        gateway_base="https://82.70.210.36.sslip.io/v1",
+        gateway_key="sk-test-virtual-key-123456",
         llm_provider=LLMProvider.LITELLM,
     )
 
@@ -195,9 +195,11 @@ def test_hungarian_alignment_and_outlier_recovery() -> None:
 def test_end_to_end_service_and_fastapi_mvc_controllers(tmp_path: Path) -> None:
     """Verify full benchmark pipeline and FastAPI MVC controllers with provider switching."""
     settings = AppSettings(
-        gateway_base_url="https://82.70.210.36.sslip.io/v1",
-        gateway_api_key="sk-test-virtual-key-123456",
+        gateway_base="https://82.70.210.36.sslip.io/v1",
+        gateway_key="sk-test-virtual-key-123456",
         data_dir=str(tmp_path),
+        embedding_dimensions=32,
+        _env_file=None,
     )
     mock_gw = DeterministicMockGateway(settings)
     container = ServiceContainer(settings=settings, gateway=mock_gw)
@@ -224,7 +226,7 @@ def test_end_to_end_service_and_fastapi_mvc_controllers(tmp_path: Path) -> None:
         lines = ["text\tlabel"]
         for i in range(mult):
             for text_tmpl, lbl in intents:
-                lines.append(f"{text_tmpl} #{i}\t{lbl}")
+                lines.append(f"{text_tmpl} {split} example #{i}\t{lbl}")
         (
             raw_dir / f"textoir_banking77_{'val' if split == 'dev' else split}.tsv"
         ).write_text("\n".join(lines), encoding="utf-8")
@@ -348,9 +350,11 @@ def test_dataset_repo_formats_and_density_alignment(tmp_path: Path) -> None:
 def test_model_registry_persistence_and_startup_reload(tmp_path: Path) -> None:
     """Verify that fitted pipeline state persists to model_registry.joblib and auto-reloads on container restart."""
     settings = AppSettings(
-        gateway_base_url="https://82.70.210.36.sslip.io/v1",
-        gateway_api_key="sk-test-virtual-key-123456",
+        gateway_base="https://82.70.210.36.sslip.io/v1",
+        gateway_key="sk-test-virtual-key-123456",
         data_dir=str(tmp_path),
+        embedding_dimensions=32,
+        _env_file=None,
     )
     mock_gw = DeterministicMockGateway(settings)
     container1 = ServiceContainer(settings=settings, gateway=mock_gw)
@@ -366,10 +370,16 @@ def test_model_registry_persistence_and_startup_reload(tmp_path: Path) -> None:
         "\n".join(lines), encoding="utf-8"
     )
     (raw_dir / "textoir_banking77_val.tsv").write_text(
-        "\n".join(lines[:10]), encoding="utf-8"
+        "\n".join(
+            [lines[0], *[line.replace(" #", " validation #") for line in lines[1:10]]]
+        ),
+        encoding="utf-8",
     )
     (raw_dir / "textoir_banking77_test.tsv").write_text(
-        "\n".join(lines[:10]), encoding="utf-8"
+        "\n".join(
+            [lines[0], *[line.replace(" #", " testing #") for line in lines[1:10]]]
+        ),
+        encoding="utf-8",
     )
 
     container1.pipeline_service.run_benchmark_pipeline(
@@ -407,8 +417,8 @@ def test_llm_gateway_adapter_json_fence_and_dimensions() -> None:
     from ticket_classification.gateways.llm_gateway_adapter import LLMGatewaySDKAdapter
 
     settings = AppSettings(
-        gateway_base_url="https://82.70.210.36.sslip.io/v1",
-        gateway_api_key="sk-test-virtual-key-123456",
+        gateway_base="https://82.70.210.36.sslip.io/v1",
+        gateway_key="sk-test-virtual-key-123456",
         _env_file=None,
     )
     mock_client = MagicMock()
@@ -431,8 +441,8 @@ def test_llm_gateway_adapter_json_fence_and_dimensions() -> None:
 
     # When explicitly configured, verify dimensions is forwarded
     settings_with_dims = AppSettings(
-        gateway_base_url="https://82.70.210.36.sslip.io/v1",
-        gateway_api_key="sk-test-virtual-key-123456",
+        gateway_base="https://82.70.210.36.sslip.io/v1",
+        gateway_key="sk-test-virtual-key-123456",
         embedding_dimensions=768,
         _env_file=None,
     )

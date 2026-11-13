@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "ticket-classification"
 version = "0.1.0"
 description = "Cloud-native ticket and claim clustering and classification pipeline powered by llm-gateway-sdk"
-readme = "PLAN.md"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "llm-gateway-sdk[settings] @ git+https://github.com/eslam-aboutaleb/llm-gateway-sdk.git@9e2c80a7c9052dadff389d689dd7a6a1a1803507",
@@ -22,9 +22,12 @@ dependencies = [
     "uvicorn>=0.29.0",
     "matplotlib>=3.8.0",
     "seaborn>=0.13.0",
+    "langdetect>=1.0.9",
+    "joblib>=1.3.0",
 ]
 
 [project.optional-dependencies]
+discovery = ["umap-learn>=0.5.6"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",

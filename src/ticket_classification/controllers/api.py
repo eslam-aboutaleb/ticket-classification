@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from functools import lru_cache
+from pathlib import Path
+from threading import RLock
 from typing import Annotated, Any
 
+import pandas as pd
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 
+from ticket_classification.config.pipeline import PipelineConfig
 from ticket_classification.config.settings import AppSettings, LLMProvider
 from ticket_classification.gateways.llm_gateway_adapter import (
     BaseCloudGateway,
@@ -17,6 +21,7 @@ from ticket_classification.models.schemas import (
     BatchClassifyRequest,
     ClassifyTicketRequest,
     ClassifyTicketResponse,
+    FitRequest,
     ProviderStatusResponse,
     ProviderSwitchRequest,
 )
@@ -41,21 +46,50 @@ class ServiceContainer:
     ) -> None:
         self.settings = settings or AppSettings()
         self.gateway = gateway or LLMGatewaySDKAdapter(self.settings)
-        self.dataset_repo = TicketDatasetRepository(self.settings.data_dir)
-        self.cache_repo = EmbeddingCacheRepository(
-            f"{self.settings.data_dir}/cache/embeddings_cache.sqlite"
+        self._injected_gateway = gateway
+        self._services: dict[str, TicketPipelineService] = {}
+        self._lock = RLock()
+        self.pipeline_service = self.get_service(self.settings.domain_id)
+        self.dataset_repo = self.pipeline_service.dataset_repo
+        self.cache_repo = self.pipeline_service.cache_repo
+        self.model_registry_repo = self.pipeline_service.model_registry_repo
+        self.report_view = ReportAndPlotView(
+            str(Path(self.settings.data_dir) / "artifacts")
         )
-        self.model_registry_repo = ModelRegistryRepository(
-            f"{self.settings.data_dir}/artifacts/model_registry.joblib"
-        )
-        self.pipeline_service = TicketPipelineService(
-            settings=self.settings,
-            gateway=self.gateway,
-            dataset_repo=self.dataset_repo,
-            cache_repo=self.cache_repo,
-            model_registry_repo=self.model_registry_repo,
-        )
-        self.report_view = ReportAndPlotView(f"{self.settings.data_dir}/artifacts")
+
+    def get_service(self, domain_id: str | None = None) -> TicketPipelineService:
+        domain_id = domain_id or self.settings.domain_id
+        with self._lock:
+            if domain_id in self._services:
+                return self._services[domain_id]
+            config = PipelineConfig.model_validate(self.settings.load_pipeline_yaml())
+            config.profile(domain_id)  # Validate before constructing any storage paths.
+            domain_settings = (
+                self.settings
+                if domain_id == self.settings.domain_id
+                else self.settings.model_copy(
+                    update={"domain_id": domain_id}, deep=True
+                )
+            )
+            artifact_dir = Path(self.settings.data_dir) / "artifacts"
+            if domain_id != "generic":
+                artifact_dir = artifact_dir / domain_id
+            cache_path = Path(config.embedding.cache_db_path)
+            if not cache_path.is_absolute():
+                cache_path = Path(self.settings.data_dir) / cache_path
+            service = TicketPipelineService(
+                settings=domain_settings,
+                gateway=self._injected_gateway or LLMGatewaySDKAdapter(domain_settings),
+                dataset_repo=TicketDatasetRepository(
+                    self.settings.data_dir, config.datasets
+                ),
+                cache_repo=EmbeddingCacheRepository(cache_path),
+                model_registry_repo=ModelRegistryRepository(
+                    artifact_dir / "model_registry.joblib"
+                ),
+            )
+            self._services[domain_id] = service
+            return service
 
 
 @lru_cache(maxsize=1)
@@ -96,14 +130,14 @@ def switch_provider_endpoint(
 @router.get("/clusters")
 def list_discovered_clusters(
     container: ContainerDep,
+    domain_id: str | None = None,
 ) -> dict[str, Any]:
     """Return discovered cluster profiles and taxonomy metadata."""
-    return {
-        "cluster_count": len(container.pipeline_service.cluster_profiles),
-        "clusters": [
-            asdict(p) for p in container.pipeline_service.cluster_profiles.values()
-        ],
-    }
+    try:
+        service = container.get_service(domain_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return service.inspect_taxonomy()
 
 
 @router.post("/classify", response_model=ClassifyTicketResponse)
@@ -113,14 +147,18 @@ def classify_ticket_endpoint(
 ) -> ClassifyTicketResponse:
     """Classify a single support ticket or claim against discovered clusters."""
     try:
-        res = container.pipeline_service.classify_single_ticket(
+        res = container.get_service(payload.domain_id).classify_single_ticket(
             ticket_id=payload.ticket_id,
             raw_text=payload.text,
             metadata=payload.metadata,
             provider_override=payload.provider_override,
+            language_hint=payload.language_hint,
+            display_language=payload.display_language,
+            taxonomy_version=payload.taxonomy_version,
+            enable_llm_reranker=payload.enable_llm_reranker,
         )
         return ClassifyTicketResponse(**asdict(res))
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -130,16 +168,45 @@ def classify_batch_endpoint(
     container: ContainerDep,
 ) -> list[ClassifyTicketResponse]:
     """Classify a batch of support tickets or claims."""
-    results: list[ClassifyTicketResponse] = []
-    for item in payload.tickets:
-        res = container.pipeline_service.classify_single_ticket(
-            ticket_id=item.ticket_id,
-            raw_text=item.text,
-            metadata=item.metadata,
-            provider_override=payload.provider_override or item.provider_override,
+    return [
+        classify_ticket_endpoint(
+            item.model_copy(
+                update={
+                    "provider_override": payload.provider_override
+                    or item.provider_override
+                }
+            ),
+            container,
         )
-        results.append(ClassifyTicketResponse(**asdict(res)))
-    return results
+        for item in payload.tickets
+    ]
+
+
+@router.post("/fit")
+def fit_endpoint(payload: FitRequest, container: ContainerDep) -> dict[str, Any]:
+    try:
+        return container.get_service(payload.domain_id).fit_dataframe(
+            pd.DataFrame(payload.records),
+            strategy=payload.strategy,
+            use_llm_naming=payload.use_llm_naming,
+            provider_override=payload.provider_override,
+            oos_texts=payload.oos_texts,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/review-items")
+def review_items(
+    container: ContainerDep, domain_id: str | None = None, limit: int = 100
+) -> dict:
+    if not 1 <= limit <= 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    try:
+        service = container.get_service(domain_id)
+        return {"items": service.review_queue.list_items(service.profile.id, limit)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def create_app(container: ServiceContainer | None = None) -> FastAPI:
