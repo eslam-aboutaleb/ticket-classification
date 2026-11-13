@@ -1,0 +1,60 @@
+project:
+  name: "ticket-classification"
+  random_seed: 42
+
+datasets:
+  textoir_banking77:
+    train_url: "https://raw.githubusercontent.com/thuiar/TEXTOIR/main/data/banking/train.tsv"
+    val_url: "https://raw.githubusercontent.com/thuiar/TEXTOIR/main/data/banking/dev.tsv"
+    test_url: "https://raw.githubusercontent.com/thuiar/TEXTOIR/main/data/banking/test.tsv"
+    format: "tsv"
+    text_col: "text"
+    label_col: "label"
+  textoir_clinc_oos:
+    train_url: "https://raw.githubusercontent.com/thuiar/TEXTOIR/main/data/clinc/train.tsv"
+    val_url: "https://raw.githubusercontent.com/thuiar/TEXTOIR/main/data/clinc/dev.tsv"
+    test_url: "https://raw.githubusercontent.com/thuiar/TEXTOIR/main/data/clinc/test.tsv"
+    format: "tsv"
+    text_col: "text"
+    label_col: "label"
+  it_service_tickets:
+    train_url: "https://raw.githubusercontent.com/cibhibaskar/IT-service-ticket-classification/main/all_tickets_processed_improved_v3.csv"
+    format: "csv"
+    text_col: "Document"
+    label_col: "Topic_group"
+  cfpb_claims:
+    train_url: "https://raw.githubusercontent.com/RitikKumar3/Automatic-Ticket-Classification/main/complaints-2021-05-14_08_16.json"
+    format: "cfpb_json"
+    text_col: "complaint_what_happened"
+    label_col: "product"
+  airweave_incidents:
+    train_url: "https://raw.githubusercontent.com/airweave-ai/error-monitoring-agent/main/backend/samples/errors.py"
+    format: "airweave_py"
+    text_col: "message"
+    label_col: "error_type"
+
+cleaning:
+  strip_email_headers: true
+  strip_disclaimers: true
+  mask_pii: true
+  normalize_redactions: true
+  min_token_length: 2
+
+embedding:
+  batch_size: 64
+  cache_db_path: "data/cache/embeddings_cache.sqlite"
+
+clustering:
+  default_strategy: "aligned_kmeans" # options: aligned_kmeans, hdbscan_density, nmf_topic
+  umap_components: 10
+  k_min: 4
+  k_max: 20
+  outlier_recovery_threshold: 0.55
+  min_cluster_support: 3
+
+classification:
+  pseudo_label_confidence_quantile: 0.15
+  min_data_per_class: 3
+  open_set_distance_quantile: 0.96
+  ambiguous_margin_threshold: 0.12
+  enable_llm_reranker: true

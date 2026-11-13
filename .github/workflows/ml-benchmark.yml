@@ -1,0 +1,37 @@
+name: ML and LLM Gateway Benchmark
+
+on:
+  schedule:
+    - cron: '30 5 * * 1'
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: 'Cloud LLM provider route (litellm, openai, or gemini)'
+        required: false
+        type: string
+        default: 'openai'
+      dataset:
+        description: 'Benchmark dataset (textoir_banking77, textoir_clinc_oos, airweave_incidents, cfpb_claims)'
+        required: false
+        type: string
+        default: 'textoir_banking77'
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    uses: eslam-aboutaleb/ci-workflows/.github/workflows/ml-benchmark.yml@225793bab5a8d87363ffefda5e224b553c714bec
+    permissions:
+      contents: read
+    with:
+      project-dir: .
+      target: ci-benchmark
+      python-version: '3.11'
+      provider: ${{ inputs.provider || 'openai' }}
+      dataset: ${{ inputs.dataset || 'textoir_banking77' }}
+      report-file: BENCHMARK_REPORT.md
+      artifacts-dir: data/artifacts
+      gateway-base-url: ${{ vars.LLM_GATEWAY_BASE_URL || 'https://82.70.210.36.sslip.io/v1' }}
+    secrets:
+      llm-gateway-api-key: ${{ secrets.LLM_GATEWAY_API_KEY }}

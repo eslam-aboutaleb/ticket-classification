@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/eslam-aboutaleb/ci-workflows/main/.github/ci.schema.json",
+  "version": 1,
+  "python": {
+    ".": {
+      "python-versions": [
+        "3.11",
+        "3.12"
+      ],
+      "pip-extras": "dev",
+      "coverage-source": "src/ticket_classification",
+      "coverage-min": 85,
+      "build-distribution": false
+    }
+  }
+}
