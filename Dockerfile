@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 ca-cer
     && groupadd --gid 10001 app && useradd --uid 10001 --gid app --create-home app \
     && mkdir /data && chown app:app /data
 ENV PATH="/app/.venv/bin:$PATH" \
-    APP_ENV=production AUTH_ENABLED=true \
+    APP_ENV=production \
     CONFIG_PATH=/app/configs/pipeline_config.yaml DATA_DIR=/data \
     PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/tmp/matplotlib \
     OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 MKL_NUM_THREADS=2
